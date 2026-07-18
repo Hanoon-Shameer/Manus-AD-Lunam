@@ -1,0 +1,55 @@
+import cv2
+import mediapipe as mp
+
+class HandDetector:
+    def __init__(self, mode=False, max_hands=2, detection_con=0.5, track_con=0.5):
+        self.mode = mode
+        self.max_hands = max_hands
+        self.detection_con = detection_con
+        self.track_con = track_con
+        
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(
+            static_image_mode=self.mode,
+            max_num_hands=self.max_hands,
+            min_detection_confidence=self.detection_con,
+            min_tracking_confidence=self.track_con
+        )
+        self.mp_draw = mp.solutions.drawing_utils
+
+    def find_hands(self, img, draw=True):
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        self.results = self.hands.process(img_rgb)
+        
+        if self.results.multi_hand_landmarks:
+            for hand_lms in self.results.multi_hand_landmarks:
+                if draw:
+                    self.mp_draw.draw_landmarks(
+                        img, hand_lms, self.mp_hands.HAND_CONNECTIONS
+                    )
+        return img
+
+    def get_hand_info(self, img):
+        """
+        Returns a dictionary containing data for both hands:
+        { 'Left': [(x, y), ...], 'Right': [(x, y), ...] }
+        """
+        hands_data = {}
+        
+        if self.results.multi_hand_landmarks:
+            # We loop through both the landmarks and the classification (Left vs Right labels)
+            for hand_lms, hand_handedness in zip(self.results.multi_hand_landmarks, self.results.multi_handedness):
+                # MediaPipe flips the label because of the camera mirror effect.
+                # If it says "Left", it's usually your physical right hand on screen.
+                label = hand_handedness.classification[0].label
+                
+                lm_list = []
+                for lm in hand_lms.landmark:
+                    # Convert normalized coordinates (0.0 to 1.0) into actual pixel values
+                    h, w, c = img.shape
+                    cx, cy = int(lm.x * w), int(lm.y * h)
+                    lm_list.append((cx, cy))
+                
+                hands_data[label] = lm_list
+                
+        return hands_data
