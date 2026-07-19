@@ -7,9 +7,7 @@ class GestureController:
         return lm_list[tip_id][1] < lm_list[pip_id][1]
 
     def get_active_fingers(self, lm_list):
-        """
-        Maps out exactly which fingers are open.
-        """
+        """Maps out exactly which fingers are open."""
         fingers = {
             'index': self.is_finger_open(lm_list, 8, 6),
             'middle': self.is_finger_open(lm_list, 12, 10),
@@ -26,9 +24,9 @@ class GestureController:
         
         # Safety fallback if hands drop out of frame
         if len(detected_hands) == 0:
-            return "NO HANDS DETECTED"
+            return "S"
         if len(detected_hands) == 1:
-            return "STOP" # Default to stop for safety if one hand vanishes
+            return "S" # Default to stop for safety if one hand vanishes
 
         # Sort hands by screen position so your left side is always screen_left
         sorted_hands = sorted(detected_hands, key=lambda lm: lm[0][0])
@@ -50,22 +48,22 @@ class GestureController:
         # Straight: All fingers closed (fist)
         is_steer_straight = (right_open_count == 0)
 
-        # --- STEP 3: PAIR GESTURES TO GENERATE COMMANDS ---
+        # --- STEP 3: PAIR GESTURES TO GENERATE LIGHTWEIGHT COMMANDS ---
         if is_accelerator:
             if is_steer_straight:
-                return "FORWARD"
+                return "F"
             elif is_steer_left:
-                return "FORWARD LEFT"
+                return "FL"
             elif is_steer_right:
-                return "FORWARD RIGHT"
+                return "FR"
 
         if is_reverse:
             if is_steer_straight:
-                return "REVERSE"
+                return "B"
             elif is_steer_left:
-                return "REVERSE LEFT"
+                return "BL"
             elif is_steer_right:
-                return "REVERSE RIGHT"
+                return "BR"
 
         # If hands are up but don't match our specific combinations, halt the vehicle
-        return "STOP"
+        return "S"

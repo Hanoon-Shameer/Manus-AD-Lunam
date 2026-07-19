@@ -1,82 +1,95 @@
 // --- VIRTUAL ROVER CONTROL CODE ---
 
-// We assign digital pins on the ESP32 chip to control the motors
-const int leftMotorForward = 12;   // Pin to move left wheel forward
-const int leftMotorBackward = 13;  // Pin to move left wheel backward
-const int rightMotorForward = 25;  // Pin to move right wheel forward
-const int rightMotorBackward = 26; // Pin to move right wheel backward
+const int leftMotorForward = 12;   // Pin to move left wheel forward[cite: 1]
+const int leftMotorBackward = 13;  // Pin to move left wheel backward[cite: 1]
+const int rightMotorForward = 25;  // Pin to move right wheel forward[cite: 1]
+const int rightMotorBackward = 26; // Pin to move right wheel backward[cite: 1]
 
 void setup() {
-  // Start the serial communication so Abhay's Python code can talk to us
-  Serial.begin(115200);
-  Serial.println("Manus-Ad-Lunam Rover is Online!");
+  Serial.begin(115200); //[cite: 1]
+  Serial.println("Manus-Ad-Lunam Rover is Online!"); //[cite: 1]
 
-  // Tell the ESP32 that these pins will send electrical signals OUT to motors
-  pinMode(leftMotorForward, OUTPUT);
-  pinMode(leftMotorBackward, OUTPUT);
-  pinMode(rightMotorForward, OUTPUT);
-  pinMode(rightMotorBackward, OUTPUT);
+  pinMode(leftMotorForward, OUTPUT); //[cite: 1]
+  pinMode(leftMotorBackward, OUTPUT); //[cite: 1]
+  pinMode(rightMotorForward, OUTPUT); //[cite: 1]
+  pinMode(rightMotorBackward, OUTPUT); //[cite: 1]
   
-  stopRover(); // Start in a safe, stopped position
+  stopRover(); // Start in a safe, stopped position[cite: 1]
 }
 
 void loop() {
-  // Check if Abhay's Python script just sent a command text over the wire
-  if (Serial.available() > 0) {
-    String command = Serial.readStringUntil('\n'); // Read the command line
-    command.trim(); // Clean up any invisible spaces
+  if (Serial.available() > 0) { //[cite: 1]
+    String command = Serial.readStringUntil('\n'); //[cite: 1]
+    command.trim(); //[cite: 1]
     
-    // Print what we received to the test screen
-    Serial.print("Received Command: ");
-    Serial.println(command);
+    Serial.print("Received Command: "); //[cite: 1]
+    Serial.println(command); //[cite: 1]
     
-    // Deciding what to do based on what Abhay's code sent
-    if (command == "FORWARD") {
+    // Deciding what to do based on Abhay's new token layout
+    if (command == "F") {
       moveForward();
-    } else if (command == "BACKWARD") {
+    } else if (command == "FL") {
+      moveForwardLeft();
+    } else if (command == "FR") {
+      moveForwardRight();
+    } else if (command == "B") {
       moveBackward();
-    } else if (command == "LEFT") {
-      turnLeft();
-    } else if (command == "RIGHT") {
-      turnRight();
-    } else if (command == "STOP") {
+    } else if (command == "BL") {
+      moveBackwardLeft();
+    } else if (command == "BR") {
+      moveBackwardRight();
+    } else if (command == "S") {
       stopRover();
     }
   }
 }
 
 // --- HOW THE WHEELS SPIN ---
-void moveForward() {
-  digitalWrite(leftMotorForward, HIGH);   // Turn on left forward
+void moveForward() { //[cite: 1]
+  digitalWrite(leftMotorForward, HIGH);   //[cite: 1]
+  digitalWrite(leftMotorBackward, LOW); //[cite: 1]
+  digitalWrite(rightMotorForward, HIGH);  //[cite: 1]
+  digitalWrite(rightMotorBackward, LOW); //[cite: 1]
+} //[cite: 1]
+
+void moveBackward() { //[cite: 1]
+  digitalWrite(leftMotorForward, LOW); //[cite: 1]
+  digitalWrite(leftMotorBackward, HIGH);  //[cite: 1]
+  digitalWrite(rightMotorForward, LOW); //[cite: 1]
+  digitalWrite(rightMotorBackward, HIGH); //[cite: 1]
+} //[cite: 1]
+
+void moveForwardLeft() {
+  digitalWrite(leftMotorForward, LOW);    // Left side stops
   digitalWrite(leftMotorBackward, LOW);
-  digitalWrite(rightMotorForward, HIGH);  // Turn on right forward
+  digitalWrite(rightMotorForward, HIGH);  // Right side drives forward
   digitalWrite(rightMotorBackward, LOW);
 }
 
-void moveBackward() {
-  digitalWrite(leftMotorForward, LOW);
-  digitalWrite(leftMotorBackward, HIGH);  // Turn on left backward
-  digitalWrite(rightMotorForward, LOW);
-  digitalWrite(rightMotorBackward, HIGH); // Turn on right backward
-}
-
-void turnLeft() {
-  digitalWrite(leftMotorForward, LOW);
-  digitalWrite(leftMotorBackward, HIGH);
-  digitalWrite(rightMotorForward, HIGH);
+void moveForwardRight() {
+  digitalWrite(leftMotorForward, HIGH);   // Left side drives forward
+  digitalWrite(leftMotorBackward, LOW);
+  digitalWrite(rightMotorForward, LOW);   // Right side stops
   digitalWrite(rightMotorBackward, LOW);
 }
 
-void turnRight() {
-  digitalWrite(leftMotorForward, HIGH);
+void moveBackwardLeft() {
+  digitalWrite(leftMotorForward, LOW);    // Left side stops
   digitalWrite(leftMotorBackward, LOW);
   digitalWrite(rightMotorForward, LOW);
-  digitalWrite(rightMotorBackward, HIGH);
+  digitalWrite(rightMotorBackward, HIGH); // Right side drives backward
 }
 
-void stopRover() {
+void moveBackwardRight() {
   digitalWrite(leftMotorForward, LOW);
-  digitalWrite(leftMotorBackward, LOW);
-  digitalWrite(rightMotorForward, LOW);
+  digitalWrite(leftMotorBackward, HIGH);  // Left side drives backward
+  digitalWrite(rightMotorForward, LOW);    // Right side stops
   digitalWrite(rightMotorBackward, LOW);
 }
+
+void stopRover() { //[cite: 1]
+  digitalWrite(leftMotorForward, LOW); //[cite: 1]
+  digitalWrite(leftMotorBackward, LOW); //[cite: 1]
+  digitalWrite(rightMotorForward, LOW); //[cite: 1]
+  digitalWrite(rightMotorBackward, LOW); //[cite: 1]
+} //[cite: 1]
