@@ -31,21 +31,24 @@ class HandDetector:
 
     def get_hand_info(self, img):
         """
-        Returns a dictionary containing data for both hands:
-        { 'Left': [(x, y), ...], 'Right': [(x, y), ...] }
+        Returns a dictionary containing data for both hands with flipped labels 
+        to account for webcam mirroring.
         """
         hands_data = {}
         
         if self.results.multi_hand_landmarks:
-            # We loop through both the landmarks and the classification (Left vs Right labels)
             for hand_lms, hand_handedness in zip(self.results.multi_hand_landmarks, self.results.multi_handedness):
-                # MediaPipe flips the label because of the camera mirror effect.
-                # If it says "Left", it's usually your physical right hand on screen.
-                label = hand_handedness.classification[0].label
+                # Grab the raw label from MediaPipe ('Left' or 'Right')
+                mp_label = hand_handedness.classification[0].label
+                
+                # INVERSION LOGIC: Force the opposite label
+                if mp_label == "Left":
+                    label = "Right"
+                else:
+                    label = "Left"
                 
                 lm_list = []
                 for lm in hand_lms.landmark:
-                    # Convert normalized coordinates (0.0 to 1.0) into actual pixel values
                     h, w, c = img.shape
                     cx, cy = int(lm.x * w), int(lm.y * h)
                     lm_list.append((cx, cy))

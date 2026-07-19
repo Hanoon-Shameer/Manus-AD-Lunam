@@ -3,7 +3,7 @@ from hand_detector import HandDetector
 
 def initialize_system():
     """Initializes the webcam and the hand detector."""
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(0)  # Use the second camera (index 1)
     detector = HandDetector()
     return cap, detector
 
