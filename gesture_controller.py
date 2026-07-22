@@ -1,6 +1,9 @@
 class GestureController:
-    def __init__(self):
-        pass
+    def __init__(self, debounce_threshold=2):
+        self.last_stable_command = "S"
+        self.pending_command = "S"
+        self.frame_counter = 0
+        self.debounce_threshold = debounce_threshold  # Must hold new gesture for 2 consecutive frames
 
     def is_finger_open(self, lm_list, tip_id, pip_id):
         """Returns True if the finger tip is higher up (smaller y) than the knuckle."""
@@ -15,55 +18,83 @@ class GestureController:
             'pinky': self.is_finger_open(lm_list, 20, 18)
         }
         
-        # Thumb check: True if thumb tip is far away from the palm base horizontally
-        fingers['thumb'] = abs(lm_list[4][0] - lm_list[0][0]) > abs(lm_list[2][0] - lm_list[0][0])
+        # Improved Thumb check: Distance between Thumb Tip (4) and Index MCP Knuckle (5)
+        # Compare against distance between Index MCP (5) and Wrist (0)
+        thumb_tip_to_index = abs(lm_list[4][0] - lm_list[5][0])
+        wrist_to_index = abs(lm_list[5][1] - lm_list[0][1])
+        fingers['thumb'] = thumb_tip_to_index > (wrist_to_index * 0.35)
+        
         return fingers
 
-    def get_command(self, hands_data):
+    def evaluate_raw_command(self, hands_data):
+        """Evaluates raw gesture data from MediaPipe landmarks."""
         detected_hands = list(hands_data.values())
         
-        # Safety fallback if hands drop out of frame
+        # Safety fallback if no hands in frame
         if len(detected_hands) == 0:
             return "S"
-        if len(detected_hands) == 1:
-            return "S" # Default to stop for safety if one hand vanishes
 
-        # Sort hands by screen position so your left side is always screen_left
-        sorted_hands = sorted(detected_hands, key=lambda lm: lm[0][0])
+        # If 1 hand is present (Single hand mode: Left hand = Pedals)
+        if len(detected_hands) == 1:
+            left_f = self.get_active_fingers(detected_hands[0])
+            open_count = sum(left_f.values())
+            
+            # Open palm = Forward
+            if open_count >= 4:
+                return "F"
+            # Fist = Stop
+            elif open_count <= 1:
+                return "S"
+            # Index + Pinky = Reverse
+            elif left_f['index'] and left_f['pinky'] and not left_f['middle']:
+                return "B"
+            return "S"
+
+        # Dual Hand Mode (Hand 0 = Left / Pedals, Hand 1 = Right / Steering)
+        sorted_hands = sorted(hands_data.values(), key=lambda h: h[0][0])
         left_f = self.get_active_fingers(sorted_hands[0])
         right_f = self.get_active_fingers(sorted_hands[1])
 
         left_open_count = sum(left_f.values())
         right_open_count = sum(right_f.values())
 
-        # --- STEP 1: DECODE LEFT HAND (PEDALS) ---
-        is_accelerator = (left_open_count == 5)
-        is_reverse = (left_f['index'] and left_f['pinky'] and not (left_f['thumb'] or left_f['middle'] or left_f['ring']))
+        # Step 1: Decode Left Hand (Pedals)
+        is_accelerator = (left_open_count >= 4)
+        is_reverse = (left_f['index'] and left_f['pinky'] and not left_f['middle'])
 
-        # --- STEP 2: DECODE RIGHT HAND (STEERING) ---
-        # Left Turn: Only thumb open
-        is_steer_left = (right_f['thumb'] and not (right_f['index'] or right_f['middle'] or right_f['ring'] or right_f['pinky']))
-        # Right Turn: Only pinky open
-        is_steer_right = (right_f['pinky'] and not (right_f['thumb'] or right_f['index'] or right_f['middle'] or right_f['ring']))
-        # Straight: All fingers closed (fist)
-        is_steer_straight = (right_open_count == 0)
+        # Step 2: Decode Right Hand (Steering)
+        is_steer_left = right_f['thumb'] and not right_f['pinky']
+        is_steer_right = right_f['pinky'] and not right_f['thumb']
+        is_steer_straight = (right_open_count <= 1) or (not is_steer_left and not is_steer_right)
 
-        # --- STEP 3: PAIR GESTURES TO GENERATE LIGHTWEIGHT COMMANDS ---
+        # Step 3: Combine Commands
         if is_accelerator:
-            if is_steer_straight:
-                return "F"
-            elif is_steer_left:
+            if is_steer_left:
                 return "FL"
             elif is_steer_right:
                 return "FR"
-
-        if is_reverse:
-            if is_steer_straight:
-                return "B"
-            elif is_steer_left:
+            else:
+                return "F"
+        elif is_reverse:
+            if is_steer_left:
                 return "BL"
             elif is_steer_right:
                 return "BR"
+            else:
+                return "B"
 
-        # If hands are up but don't match our specific combinations, halt the vehicle
         return "S"
+
+    def get_command(self, hands_data):
+        """Debounces commands to eliminate single-frame flickering."""
+        raw_cmd = self.evaluate_raw_command(hands_data)
+
+        if raw_cmd == self.pending_command:
+            self.frame_counter += 1
+            if self.frame_counter >= self.debounce_threshold:
+                self.last_stable_command = raw_cmd
+        else:
+            self.pending_command = raw_cmd
+            self.frame_counter = 0
+
+        return self.last_stable_command
