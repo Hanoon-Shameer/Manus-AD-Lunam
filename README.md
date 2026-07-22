@@ -57,35 +57,35 @@ Biju Antony (HOD of 9-12 Block).
 
 ***Hardware Items:***
 
--Servo Motor
--BO Motors x4
--Wheels x4
--Motor Driver
--Buck converter
--ESP32 Development Kit x2
--Micro-USB Data Cable x2
--Android Phone (For camera)
--Male to Male jumper cables
--Male to Female jumper cables
--Female to Female jumper cables
--HC-SR04 Ultrasonic Sensor
--18650 Li-ion 3.7V Button Top Batteries x4
--Double Cell 18650 Battery Holder
--Dual-Slot 18650 Battery Charger
--3A or 5A 5x20mm Fast-Blow Glass Fuses x3
--5x20mm Panel Mount Fuse Holder
--ON/OFF Toggle Switch
--8-Channel Logic Level Converter
--0.1uF 104 Ceramic Capacitors x6
--100uF 35V Radial Electrolytic Capacitors x2
--M3 x 6mm Male to Female Nylon Hex Standoffs x14
--WAGO Style Lever Connectors / Screw Terminal Blocks
--LEDs
--Resistors
--Mini Solderless Breadboard x2
--32x8 led dot matrix module
--Red & Black Wires (FOR POWER)
-& more according to final idea.
+* Servo Motor
+* BO Motors x4
+* Wheels x4
+* Motor Driver
+* Buck converter
+* ESP32 Development Kit x2
+* Micro-USB Data Cable x2
+* Android Phone (For camera)
+* Male to Male jumper cables
+* Male to Female jumper cables
+* Female to Female jumper cables
+* HC-SR04 Ultrasonic Sensor
+* 18650 Li-ion 3.7V Button Top Batteries x4
+* Double Cell 18650 Battery Holder
+* Dual-Slot 18650 Battery Charger
+* 3A or 5A 5x20mm Fast-Blow Glass Fuses x3
+* 5x20mm Panel Mount Fuse Holder
+* ON/OFF Toggle Switch
+* 8-Channel Logic Level Converter
+* 0.1uF 104 Ceramic Capacitors x6
+* 100uF 35V Radial Electrolytic Capacitors x2
+* M3 x 6mm Male to Female Nylon Hex Standoffs x14
+* WAGO Style Lever Connectors / Screw Terminal Blocks
+* LEDs
+* Resistors
+* Mini Solderless Breadboard x2
+* 32x8 led dot matrix module
+* Red & Black Wires (FOR POWER)
+* & more according to final idea.
 
 ***Features:***
 
