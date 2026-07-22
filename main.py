@@ -22,6 +22,9 @@ def main():
         # Extract landmark lists and evaluate gesture mapping
         hands_data = detector.get_hand_info(frame)
         command = controller.get_command(hands_data)
+
+        # ADD THIS DIAGNOSTIC LINE HERE:
+        print(f"Tracking Status -> Gestures evaluated to payload: '{command}'")
         
         # Fire off code over serial if pipeline is up
         if is_connected:
