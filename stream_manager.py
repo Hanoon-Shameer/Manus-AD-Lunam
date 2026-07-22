@@ -39,7 +39,9 @@ class CameraThread(QThread):
             bytes_per_line = ch * w
 
             # Create a PyQt-compatible image object
-            qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+            # MEMORY FIX: .copy() creates an independent memory buffer so Qt doesn't 
+            # reference freed NumPy memory when window clicks/repaints occur.
+            qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
 
             # Send data back to the main UI thread via signal
             self.frame_processed.emit(qt_image, raw_frame)

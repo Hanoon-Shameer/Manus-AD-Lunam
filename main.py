@@ -1,4 +1,10 @@
 import sys
+import ctypes
+
+if sys.platform == "win32":
+    myappid = "ManusADLunam.0.1"  # Arbitrary string unique to your application
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+
 from PyQt6.QtWidgets import QApplication
 from ui_dashboard import MADDashboard
 
@@ -14,4 +20,7 @@ def main():
     sys.exit(app.exec())
 
 if __name__ == "__main__":
-    main()
+    app = QApplication(sys.argv)
+    window = MADDashboard()
+    window.show()
+    sys.exit(app.exec())
