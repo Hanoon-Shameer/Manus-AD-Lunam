@@ -26,12 +26,12 @@ class MADDashboard(QMainWindow):
         script_dir = os.path.dirname(os.path.abspath(__file__))
         icon_path = os.path.join(script_dir, "icon.png")
 
-        print(f"Checking icon path: {icon_path}")
-        print(f"Icon exists? {os.path.exists(icon_path)}")
-        
         # Set window title bar and taskbar icon
         if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+            icon = QIcon(icon_path)
+            self.setWindowIcon(icon)
+        else:
+            print(f"Icon file not found at: {icon_path}")
 
         # 1. Hardware & Computer Vision Modules
         self.detector = HandDetector()
