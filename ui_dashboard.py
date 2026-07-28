@@ -53,7 +53,7 @@ class MADDashboard(QMainWindow):
         self.gesture_thread.start()
 
         # Rover Camera (Set flip=False if DroidCam text is mirrored)
-        self.rover_thread = CameraThread(source="http://100.75.236.124:4747/video", flip=False, detector=None)
+        self.rover_thread = CameraThread(source=1, flip=False, detector=None)
         self.rover_thread.frame_processed.connect(self.update_rover_feed)
         self.rover_thread.start()
 
