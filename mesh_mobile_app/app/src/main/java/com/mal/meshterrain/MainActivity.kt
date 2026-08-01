@@ -3,8 +3,6 @@ package com.mal.meshterrain
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.util.Log
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -13,6 +11,10 @@ import com.google.ar.core.Config
 import com.google.ar.core.Session
 import com.google.ar.core.exceptions.UnavailableException
 import android.opengl.GLSurfaceView
+import android.view.View
+import android.widget.Button
+import android.widget.EditText
+import android.widget.TextView
 
 class MainActivity : AppCompatActivity() {
 
@@ -20,20 +22,33 @@ class MainActivity : AppCompatActivity() {
     private var arSession: Session? = null
     private val CAMERA_PERMISSION_CODE = 100
 
-    private lateinit var startScreen: android.view.View
-    private lateinit var arOverlay: android.view.View
-    private lateinit var btnLaunch: android.widget.Button
-    private lateinit var btnStream: android.widget.Button
-    private lateinit var tvIp: android.widget.TextView
+    private lateinit var startScreen: View
+    private lateinit var arOverlay: View
+    private lateinit var btnLaunch: Button
+    private lateinit var btnStream: Button
+    private lateinit var tvIp: TextView
+    private lateinit var tvConnectionStatus: TextView
+
+    // Top Popover Elements
+    private lateinit var topPopover: View
+    private lateinit var popoverText: TextView
+    private lateinit var etPort: EditText
+    private lateinit var btnPopoverConfirm: Button
 
     private var renderer: TerrainRenderer? = null
     private var streamServer: MjpegServer? = null
     private var isStreaming = false
     private var isScannerStarted = false
+    
+    private var activeNotificationMsg: String? = null
+    private val hideNotificationRunnable = Runnable { hidePopover() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        
+        // Prevent screen from turning off/dimming during use
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         
         glSurfaceView = findViewById(R.id.gl_surface_view)
         startScreen = findViewById(R.id.start_screen)
@@ -41,6 +56,12 @@ class MainActivity : AppCompatActivity() {
         btnLaunch = findViewById(R.id.btn_launch)
         btnStream = findViewById(R.id.btn_stream)
         tvIp = findViewById(R.id.tv_ip)
+        tvConnectionStatus = findViewById(R.id.tv_connection_status)
+
+        topPopover = findViewById(R.id.top_popover)
+        popoverText = findViewById(R.id.popover_text)
+        etPort = findViewById(R.id.et_port)
+        btnPopoverConfirm = findViewById(R.id.btn_popover_confirm)
 
         glSurfaceView.setEGLContextClientVersion(2)
 
@@ -49,10 +70,96 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnStream.setOnClickListener {
-            toggleStreaming()
+            if (isStreaming) {
+                toggleStreaming(null)
+            } else {
+                showPortInputPopover()
+            }
         }
         
-        streamServer = MjpegServer(8080)
+        btnPopoverConfirm.setOnClickListener {
+            val portStr = etPort.text.toString()
+            val port = portStr.toIntOrNull() ?: 8081
+            hidePopover()
+            toggleStreaming(port)
+        }
+        
+        streamServer = MjpegServer(8081).apply {
+            setClientStatusListener { connected ->
+                runOnUiThread {
+                    if (connected && isStreaming) {
+                        tvConnectionStatus.visibility = View.VISIBLE
+                        showNotification("PC CONNECTED")
+                    } else {
+                        tvConnectionStatus.visibility = View.GONE
+                        if (isStreaming) {
+                            showNotification("PC DISCONNECTED")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun showNotification(msg: String, durationMs: Long = 3000) {
+        runOnUiThread {
+            topPopover.removeCallbacks(hideNotificationRunnable)
+            activeNotificationMsg = msg
+            
+            popoverText.text = msg
+            etPort.visibility = View.GONE
+            btnPopoverConfirm.visibility = View.GONE
+            
+            showPopover()
+            
+            topPopover.postDelayed(hideNotificationRunnable, durationMs)
+        }
+    }
+
+    private fun showPortInputPopover() {
+        topPopover.removeCallbacks(hideNotificationRunnable)
+        popoverText.text = "SET PORT:"
+        etPort.visibility = View.VISIBLE
+        btnPopoverConfirm.visibility = View.VISIBLE
+        etPort.setText("8081")
+        showPopover()
+        
+        etPort.requestFocus()
+        val imm = getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+        imm.showSoftInput(etPort, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    private fun showPopover() {
+        topPopover.visibility = View.VISIBLE
+        topPopover.post {
+            // Pivot at the top center (where the camera hole is)
+            topPopover.pivotX = topPopover.width / 2f
+            topPopover.pivotY = 0f
+            
+            topPopover.animate()
+                .alpha(1f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .translationY(10f) // Drop slightly from the hole
+                .setDuration(500)
+                .setInterpolator(android.view.animation.OvershootInterpolator(1.4f))
+                .start()
+        }
+    }
+
+    private fun hidePopover() {
+        val imm = getSystemService(android.view.inputmethod.InputMethodManager::class.java)
+        imm.hideSoftInputFromWindow(etPort.windowToken, 0)
+        
+        topPopover.animate()
+            .alpha(0f)
+            .scaleX(0.1f)
+            .scaleY(0.1f)
+            .translationY(0f) // Pull back into the hole
+            .setDuration(400)
+            .setInterpolator(android.view.animation.AnticipateInterpolator())
+            .withEndAction { topPopover.visibility = View.GONE }
+            .start()
     }
 
     private fun startScanner() {
@@ -73,60 +180,82 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showArView() {
-        startScreen.visibility = android.view.View.GONE
-        glSurfaceView.visibility = android.view.View.VISIBLE
-        arOverlay.visibility = android.view.View.VISIBLE
-        tvIp.text = "IP: ${getIPAddress()}"
+        startScreen.visibility = View.GONE
+        glSurfaceView.visibility = View.VISIBLE
+        arOverlay.visibility = View.VISIBLE
         
-        // Hide status and navigation bars for a clean look
+        // IP and Port are initially hidden via XML (visibility: gone)
+        
         @Suppress("DEPRECATION")
-        window.decorView.systemUiVisibility = (android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
-                or android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                or android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
+        window.decorView.systemUiVisibility = (View.SYSTEM_UI_FLAG_FULLSCREEN
+                or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY)
     }
 
-    private fun toggleStreaming() {
-        isStreaming = !isStreaming
-        if (isStreaming) {
+    private fun updateIpDisplay(port: Int) {
+        val ips = getIPAddressesList()
+        tvIp.text = "IPs:\n${ips.joinToString("\n")}\n(Port: $port)"
+        tvIp.visibility = View.VISIBLE
+    }
+
+    private fun toggleStreaming(port: Int?) {
+        if (port != null) {
+            // Start Streaming
+            isStreaming = true
             btnStream.text = "STOP STREAMING"
             btnStream.setBackgroundColor(android.graphics.Color.RED)
-            streamServer?.start()
+            
+            streamServer?.start(port) { success ->
+                runOnUiThread {
+                    if (success) {
+                        updateIpDisplay(port)
+                        showNotification("SERVER LIVE ON PORT $port")
+                    } else {
+                        isStreaming = false
+                        btnStream.text = "STREAM TO PC"
+                        btnStream.setBackgroundColor(android.graphics.Color.parseColor("#00E676"))
+                        tvIp.visibility = View.GONE
+                        showNotification("PORT $port BLOCKED!")
+                    }
+                }
+            }
             renderer?.setStreamingListener { bitmap ->
                 streamServer?.pushFrame(bitmap)
             }
-            logAndToast("Streaming started at http://${getIPAddress()}:8080")
         } else {
+            // Stop Streaming
+            isStreaming = false
             btnStream.text = "STREAM TO PC"
             btnStream.setBackgroundColor(android.graphics.Color.parseColor("#00E676"))
+            tvIp.visibility = View.GONE
+            tvConnectionStatus.visibility = View.GONE
             renderer?.setStreamingListener(null)
             streamServer?.stop()
-            logAndToast("Streaming stopped")
+            showNotification("STREAMING TERMINATED")
         }
     }
 
-    private fun getIPAddress(): String {
+    private fun getIPAddressesList(): List<String> {
+        val list = mutableListOf<String>()
         try {
             val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
-            val list = mutableListOf<java.net.InetAddress>()
             while (interfaces.hasMoreElements()) {
                 val networkInterface = interfaces.nextElement()
                 val addresses = networkInterface.inetAddresses
                 while (addresses.hasMoreElements()) {
                     val address = addresses.nextElement()
                     if (!address.isLoopbackAddress && address is java.net.Inet4Address) {
-                        // Prefer wlan0 or similar Wi-Fi interfaces
+                        val ip = address.hostAddress ?: continue
                         if (networkInterface.name.contains("wlan") || networkInterface.name.contains("ap")) {
-                            return address.hostAddress ?: "Unknown"
+                            list.add(0, ip)
+                        } else {
+                            list.add(ip)
                         }
-                        list.add(address)
                     }
                 }
             }
-            return if (list.isNotEmpty()) list[0].hostAddress ?: "Unknown" else "Unknown"
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        return "Unknown"
+        } catch (e: Exception) {}
+        return list
     }
 
     override fun onRequestPermissionsResult(
@@ -139,7 +268,7 @@ class MainActivity : AppCompatActivity() {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 startScanner()
             } else {
-                logAndToast("Camera permission denied — cannot proceed.")
+                showNotification("CAMERA PERMISSION DENIED")
             }
         }
     }
@@ -148,7 +277,7 @@ class MainActivity : AppCompatActivity() {
         try {
             val availability = ArCoreApk.getInstance().checkAvailability(this)
             if (!availability.isSupported) {
-                logAndToast("ARCore NOT supported on this device.")
+                showNotification("ARCORE NOT SUPPORTED")
                 isScannerStarted = false
                 return
             }
@@ -160,9 +289,9 @@ class MainActivity : AppCompatActivity() {
                 val config = session.config
                 config.depthMode = Config.DepthMode.AUTOMATIC
                 session.configure(config)
-                logAndToast("Depth API SUPPORTED — enabled.")
+                showNotification("DEPTH API ENABLED")
             } else {
-                logAndToast("Depth API NOT supported on this device.")
+                showNotification("DEPTH NOT SUPPORTED")
             }
 
             arSession = session
@@ -171,22 +300,16 @@ class MainActivity : AppCompatActivity() {
             glSurfaceView.setRenderer(rendererInstance)
             glSurfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
 
-            // Explicitly resume since we're already in the foreground
             glSurfaceView.onResume()
             session.resume()
 
         } catch (e: UnavailableException) {
-            logAndToast("ARCore unavailable: ${e.message}")
+            showNotification("ARCORE UNAVAILABLE")
             isScannerStarted = false
         } catch (e: Exception) {
-            logAndToast("Error setting up ARCore: ${e.message}")
+            showNotification("INIT ERROR: ${e.message}")
             isScannerStarted = false
         }
-    }
-
-    private fun logAndToast(msg: String) {
-        Log.d("MeshTerrain", msg)
-        Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
     }
 
     override fun onDestroy() {
@@ -198,7 +321,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (isScannerStarted) {
+        if (isScannerStarted && arSession != null) {
             glSurfaceView.onResume()
             arSession?.resume()
         }
@@ -206,7 +329,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        if (isScannerStarted) {
+        if (isScannerStarted && arSession != null) {
             arSession?.pause()
             glSurfaceView.onPause()
         }

@@ -18,8 +18,7 @@ class TerrainMesh(private val gridWidth: Int, private val gridHeight: Int) {
         .order(ByteOrder.nativeOrder()).asFloatBuffer()
 
     private val smoothMeters = FloatArray(vertexCount)
-    private val smoothVertices = FloatArray(vertexCount * 3)
-    private val depthLerp = 0.2f // Higher = more responsive, Lower = more "Venom" liquid look
+    private val depthLerp = 0.7f // Stiff but clean
 
     init {
         buildGrid()
@@ -75,7 +74,7 @@ class TerrainMesh(private val gridWidth: Int, private val gridHeight: Int) {
         val principalPoint = intrinsics.principalPoint
         val res = intrinsics.imageDimensions
 
-        // Align coordinates to the camera image for fullscreen stability
+        // Map Viewport (Screen) to Sensor Coordinates
         depthUvBuffer.position(0)
         frame.transformCoordinates2d(
             com.google.ar.core.Coordinates2d.VIEW_NORMALIZED,
@@ -92,47 +91,44 @@ class TerrainMesh(private val gridWidth: Int, private val gridHeight: Int) {
         val depthWidth = depthImage.width
         val depthHeight = depthImage.height
         val cameraPose = camera.pose
+        
         val pos = FloatArray(3)
 
         for (i in 0 until vertexCount) {
-            val uDepth = depthUvBuffer.get(i * 2)
-            val vDepth = depthUvBuffer.get(i * 2 + 1)
+            val uS = depthUvBuffer.get(i * 2)
+            val vS = depthUvBuffer.get(i * 2 + 1)
 
-            var meters = 6.0f 
-            if (uDepth in 0f..1f && vDepth in 0f..1f) {
-                val col = (uDepth * (depthWidth - 1)).toInt()
-                val row = (vDepth * (depthHeight - 1)).toInt()
-                val offset = row * rowStride + col * pixelStride
-                if (offset + 1 < buffer.capacity()) {
-                    val mm = (buffer.get(offset).toInt() and 0xff) or
-                            ((buffer.get(offset + 1).toInt() and 0xff) shl 8)
-                    if (mm > 0) meters = mm / 1000f
-                }
+            // Edge-clamping for fullscreen depth sampling
+            val col = (uS.coerceIn(0f, 1f) * (depthWidth - 1)).toInt()
+            val row = (vS.coerceIn(0f, 1f) * (depthHeight - 1)).toInt()
+            
+            var meters = 5.0f
+            val offset = row * rowStride + col * pixelStride
+            if (offset + 1 < buffer.capacity()) {
+                val mm = (buffer.get(offset).toInt() and 0xff) or
+                        ((buffer.get(offset + 1).toInt() and 0xff) shl 8)
+                if (mm > 0) meters = mm / 1000f
             }
 
-            // Smooth depth noise
             smoothMeters[i] += (meters - smoothMeters[i]) * depthLerp
             val d = smoothMeters[i]
 
-            // Unproject using Display Viewport UVs to keep it fullscreen
-            val screenU = displayUvBuffer.get(i * 2)
-            val screenV = displayUvBuffer.get(i * 2 + 1)
-            
+            // PHYSICALLY ACCURATE UNPROJECTION:
+            // Using Texture Intrinsics (focal length & principal point)
+            // with Sensor Coordinates (uS, vS) to find the exact 3D ray.
             val z = -d
-            val x = (screenU * res[0] - principalPoint[0]) * d / focalLength[0]
-            val y = -(screenV * res[1] - principalPoint[1]) * d / focalLength[1]
+            val x = (uS * res[0] - principalPoint[0]) * d / focalLength[0]
+            val y = -(vS * res[1] - principalPoint[1]) * d / focalLength[1]
 
             pos[0] = x; pos[1] = y; pos[2] = z
             val worldPos = cameraPose.transformPoint(pos)
 
             val idx = i * 3
-            smoothVertices[idx] += (worldPos[0] - smoothVertices[idx]) * 0.3f
-            smoothVertices[idx + 1] += (worldPos[1] - smoothVertices[idx + 1]) * 0.3f
-            smoothVertices[idx + 2] += (worldPos[2] - smoothVertices[idx + 2]) * 0.3f
+            vertexBuffer.put(idx, worldPos[0])
+            vertexBuffer.put(idx + 1, worldPos[1])
+            vertexBuffer.put(idx + 2, worldPos[2])
         }
         
-        vertexBuffer.position(0)
-        vertexBuffer.put(smoothVertices)
         vertexBuffer.position(0)
         depthImage.close()
     }

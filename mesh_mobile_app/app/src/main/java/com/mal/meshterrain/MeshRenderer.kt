@@ -28,30 +28,32 @@ class MeshRenderer {
         varying float v_Dist;
 
         void main() {
-            // 5cm world grid - Stable Topographical Spacing
-            vec3 spacing = vec3(0.06, 0.05, 0.06); 
+            // Sharper 4cm world grid for more detailed warping
+            vec3 spacing = vec3(0.04, 0.04, 0.04); 
             
-            // Reversed Thickness: Bolder at a distance (v_Dist)
-            float thickness = 0.0015 + clamp(v_Dist * 0.002, 0.0, 0.008);
+            // Scaled thickness: Thinner up close, Bold at a distance
+            float thickness = 0.0012 + clamp(v_Dist * 0.003, 0.0, 0.012);
             
             vec3 grid = abs(fract(v_WorldPos / spacing - 0.5) - 0.5) * spacing;
             
-            float lineX = smoothstep(thickness, thickness * 0.5, grid.x);
-            float lineY = smoothstep(thickness, thickness * 0.5, grid.y);
-            float lineZ = smoothstep(thickness, thickness * 0.5, grid.z);
+            float lineX = smoothstep(thickness, thickness * 0.4, grid.x);
+            float lineY = smoothstep(thickness, thickness * 0.4, grid.y);
+            float lineZ = smoothstep(thickness, thickness * 0.4, grid.z);
             
-            // Combine to form a topographical 3D skin
             float line = max(max(lineX, lineY), lineZ);
             
-            // Tech-Cyan Aesthetic
-            vec3 color = vec3(0.4, 0.9, 1.0);
+            // Tech-Cyan with a bit more vibrancy
+            vec3 color = vec3(0.3, 1.0, 0.9);
             
-            // Simple lighting based on world-Y height for depth perception
-            float lighting = 0.7 + 0.3 * sin(v_WorldPos.y * 5.0);
+            // Emphasize the "Humps" with height-based shading
+            float heightFactor = fract(v_WorldPos.y * 10.0); // 10cm bands
+            float heightGlow = smoothstep(0.9, 1.0, heightFactor) * 0.4;
             
-            // Semi-transparent face + Bright grid lines
-            float faceAlpha = 0.1; 
-            float lineAlpha = line * 0.85;
+            // Lighting based on depth to show object curvature better
+            float lighting = 0.6 + 0.4 * abs(sin(v_WorldPos.y * 8.0));
+            
+            float faceAlpha = 0.12; 
+            float lineAlpha = line * 0.9 + heightGlow;
             
             gl_FragColor = vec4(color * lighting, max(faceAlpha, lineAlpha));
         }

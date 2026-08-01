@@ -15,7 +15,7 @@ class TerrainRenderer(private val session: Session) : GLSurfaceView.Renderer {
     private var cameraTextureId: Int = -1
     private val backgroundRenderer = BackgroundRenderer()
     private val meshRenderer = MeshRenderer()
-    private val terrainMesh = TerrainMesh(80, 45)
+    private val terrainMesh = TerrainMesh(80, 50)
 
     private var viewportWidth = 0
     private var viewportHeight = 0
@@ -29,9 +29,10 @@ class TerrainRenderer(private val session: Session) : GLSurfaceView.Renderer {
     private var captureBitmap: Bitmap? = null
     private var flippedBitmap: Bitmap? = null
     private var captureCanvas: android.graphics.Canvas? = null
-    private val flipMatrix = android.graphics.Matrix().apply { postScale(1f, -1f); postTranslate(0f, 0f) }
+    private val flipMatrix = android.graphics.Matrix()
     
-    private var frameCounter = 0
+    // Scale for streaming to improve FPS (e.g., 0.5 = half resolution)
+    private val STREAM_SCALE = 0.5f 
 
     fun setStreamingListener(listener: ((Bitmap) -> Unit)?) {
         streamingListener = listener
@@ -65,15 +66,25 @@ class TerrainRenderer(private val session: Session) : GLSurfaceView.Renderer {
         viewportWidth = width
         viewportHeight = height
         
+        // Swapped width/height for PC Landscape orientation
+        val targetWidth = (height * STREAM_SCALE).toInt()
+        val targetHeight = (width * STREAM_SCALE).toInt()
+        
         // Re-allocate capture buffers on resize
         pixelBuffer = ByteBuffer.allocateDirect(width * height * 4).order(ByteOrder.LITTLE_ENDIAN)
         captureBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        flippedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        
+        // This bitmap will be sent to the PC in landscape
+        flippedBitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
         captureCanvas = android.graphics.Canvas(flippedBitmap!!)
         
         flipMatrix.reset()
-        flipMatrix.postScale(1f, -1f)
-        flipMatrix.postTranslate(0f, height.toFloat())
+        // 1. Scale down
+        flipMatrix.postScale(STREAM_SCALE, STREAM_SCALE)
+        // 2. Rotate 90 degrees right for landscape
+        flipMatrix.postRotate(90f)
+        // 3. Translate to fit the rotated dimensions
+        flipMatrix.postTranslate(targetWidth.toFloat(), 0f)
     }
 
     override fun onDrawFrame(gl: GL10?) {
@@ -92,13 +103,14 @@ class TerrainRenderer(private val session: Session) : GLSurfaceView.Renderer {
 
         meshRenderer.draw(terrainMesh, viewMatrix, projectionMatrix)
 
-        // Capture every 3rd frame to reduce overhead while streaming
-        if (streamingListener != null && ++frameCounter % 3 == 0) {
+        // Capture more frequently for higher FPS
+        if (streamingListener != null) {
             captureFrame(streamingListener!!)
         }
     }
 
     private fun captureFrame(listener: (Bitmap) -> Unit) {
+        // If the worker thread is still busy with the previous frame, drop this one
         if (isCompressing) return
 
         val buffer = pixelBuffer ?: return
@@ -112,15 +124,17 @@ class TerrainRenderer(private val session: Session) : GLSurfaceView.Renderer {
         buffer.rewind()
         bitmap.copyPixelsFromBuffer(buffer)
         
+        // Scale and flip in one go on the GPU-backed canvas
         canvas.drawBitmap(bitmap, flipMatrix, null)
         
-        // Create a copy to send to the server to avoid race conditions with next glReadPixels
+        // Copy the small scaled bitmap for the stream
         val bitmapCopy = flipped.copy(flipped.config ?: Bitmap.Config.ARGB_8888, false)
         
         isCompressing = true
         compressionExecutor.execute {
             try {
                 listener(bitmapCopy)
+            } catch (e: Exception) {
             } finally {
                 isCompressing = false
             }
