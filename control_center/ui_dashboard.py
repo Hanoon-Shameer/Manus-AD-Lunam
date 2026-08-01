@@ -48,7 +48,7 @@ class MADDashboard(QMainWindow):
 
         # Camera Sources (Change index/URL here for DroidCam, Wi-Fi stream, or USB devices)
         self.GESTURE_CAM_INDEX = 0  # Operator webcam
-        self.ROVER_CAM_INDEX = 1    # Rover stream index / IP Camera URL / DroidCam index
+        self.ROVER_CAM_INDEX = "http://100.91.87.88:8080"    # Rover stream index / IP Camera URL / DroidCam index
 
         # 2. Build User Interface Layout
         self.init_ui()
@@ -58,7 +58,7 @@ class MADDashboard(QMainWindow):
         self.gesture_thread.frame_processed.connect(self.update_gesture_feed)
         self.gesture_thread.start()
 
-        self.rover_thread = CameraThread(source=self.ROVER_CAM_INDEX, flip=False, detector=None)
+        self.rover_thread = CameraThread(source=self.ROVER_CAM_INDEX, flip=True, detector=None)
         self.rover_thread.frame_processed.connect(self.update_rover_feed)
         self.rover_thread.start()
 
