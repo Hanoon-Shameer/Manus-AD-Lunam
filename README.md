@@ -29,21 +29,11 @@ Abhay Vinod (XB2) \[Programming lead]
 
 Hanoon Shameer (XB5) \[Hardware lead]
 
-TBD \[Programmer]
-
-TBD \[Programmer]
-
-TBD \[Programmer] (optional)
-
 TBD \[Designer]
 
 TBD \[Designer]
 
 TBD \[Designer]
-
-TBD \[Designer] (optional)
-
-TBD \[Designer] (optional)
 
 
 
