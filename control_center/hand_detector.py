@@ -17,6 +17,16 @@ class HandDetector:
         )
         self.mp_draw = mp.solutions.drawing_utils
 
+        # OpenCV uses (Blue, Green, Red) format:
+        # Dark Blue dots: (180, 50, 0)
+        self.landmark_style = self.mp_draw.DrawingSpec(
+            color=(180, 50, 0), thickness=2, circle_radius=4
+        )
+        # Light Blue / Cyan connections (matches dashboard #00E5FF): (255, 229, 0)
+        self.connection_style = self.mp_draw.DrawingSpec(
+            color=(255, 229, 0), thickness=2
+        )
+
     def find_hands(self, img, draw=True):
         img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         self.results = self.hands.process(img_rgb)
@@ -25,7 +35,11 @@ class HandDetector:
             for hand_lms in self.results.multi_hand_landmarks:
                 if draw:
                     self.mp_draw.draw_landmarks(
-                        img, hand_lms, self.mp_hands.HAND_CONNECTIONS
+                        img, 
+                        hand_lms, 
+                        self.mp_hands.HAND_CONNECTIONS,
+                        landmark_drawing_spec=self.landmark_style,
+                        connection_drawing_spec=self.connection_style
                     )
         return img
 
