@@ -63,16 +63,17 @@ class MjpegServer(private var port: Int) {
             try {
                 Log.d("MjpegServer", "New connection from ${socket.inetAddress}")
                 
-                // Read the HTTP request (mandatory for some browser stacks)
+                // CRITICAL FOR OPENCV: Consume the entire HTTP request headers
                 val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
-                val requestLine = reader.readLine()
-                Log.d("MjpegServer", "Request: $requestLine")
+                var line: String? = reader.readLine()
+                while (line != null && line.isNotBlank()) {
+                    line = reader.readLine()
+                }
                 
-                // We don't care about the path, just send the stream headers
                 val outputStream = socket.getOutputStream()
-                val header = ("HTTP/1.1 200 OK\r\n" +
+                val header = ("HTTP/1.0 200 OK\r\n" +
                         "Server: MeshTerrain\r\n" +
-                        "Connection: keep-alive\r\n" +
+                        "Connection: close\r\n" +
                         "Max-Age: 0\r\n" +
                         "Expires: 0\r\n" +
                         "Cache-Control: no-cache, private\r\n" +
@@ -108,7 +109,6 @@ class MjpegServer(private var port: Int) {
             }
         }
 
-        // Try to acquire the semaphore - if busy, drop the frame to avoid queue buildup/freezing
         if (!pushSemaphore.tryAcquire()) {
             bitmap.recycle()
             return
@@ -117,11 +117,11 @@ class MjpegServer(private var port: Int) {
         pushExecutor.execute {
             try {
                 val stream = ByteArrayOutputStream()
-                // Lower quality slightly for better FPS
                 bitmap.compress(Bitmap.CompressFormat.JPEG, 35, stream)
                 val jpegData = stream.toByteArray()
                 bitmap.recycle()
 
+                // Classic MJPEG Frame Header
                 val frameHeader = ("--$boundary\r\n" +
                         "Content-Type: image/jpeg\r\n" +
                         "Content-Length: ${jpegData.size}\r\n\r\n")

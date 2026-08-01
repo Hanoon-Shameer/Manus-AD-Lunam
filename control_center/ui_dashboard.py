@@ -5,9 +5,11 @@ import cv2
 from PyQt6.QtCore import QEasingCurve, Qt, QVariantAnimation
 from PyQt6.QtGui import QFont, QIcon, QPixmap, QImage
 from PyQt6.QtWidgets import (
+    QDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QPushButton,
     QSizePolicy,
@@ -21,6 +23,111 @@ from gesture_controller import GestureController
 from hand_detector import HandDetector
 from serial_sender import SerialSender
 from stream_manager import CameraThread
+
+
+class SourceControlDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Source Control Configuration")
+        self.setFixedSize(450, 500)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #0B0D12;
+            }
+            QLabel {
+                color: #C3CEE0;
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-size: 13px;
+            }
+            QLineEdit {
+                background-color: #131722;
+                color: #00E5FF;
+                border: 1px solid #2A2F3D;
+                border-radius: 6px;
+                padding: 8px;
+                font-size: 13px;
+                font-family: 'Consolas', monospace;
+            }
+            QLineEdit:focus {
+                border: 1px solid #00E5FF;
+            }
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1A2638, stop:1 #0F1724);
+                color: #00E5FF;
+                border: 1px solid #00E5FF;
+                border-radius: 8px;
+                padding: 12px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background: #00E5FF;
+                color: #0B0D12;
+            }
+        """)
+
+        layout = QVBoxLayout()
+        layout.setSpacing(15)
+        layout.setContentsMargins(25, 25, 25, 25)
+
+        # Centered Heading with larger font size
+        heading = QLabel("Source Control")
+        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        heading.setFont(QFont('Segoe UI', 22, QFont.Weight.Bold))
+        heading.setStyleSheet("color: #00E5FF; margin-bottom: 10px;")
+        layout.addWidget(heading)
+
+        # 1. Gesture Cam Input
+        gesture_label = QLabel("Gesture Camera Index / Source:")
+        self.gesture_input = QLineEdit("0")
+        layout.addWidget(gesture_label)
+        layout.addWidget(self.gesture_input)
+
+        layout.addSpacing(10)
+
+        # 2. Rover Cam Input
+        rover_label = QLabel("Please enter the IP and Port as given in the LRS android app.")
+        rover_label.setWordWrap(True)
+        self.rover_input = QLineEdit()
+        
+        # Pre-fill with http://xxx.xx.xx.xxx:xxxx
+        self.rover_input.setText("http://xxx.xx.xx.xxx:xxxx")
+        self.rover_input.textChanged.connect(self._enforce_http_prefix)
+        
+        layout.addWidget(rover_label)
+        layout.addWidget(self.rover_input)
+
+        layout.addStretch()
+
+        # Connect / Confirm Button
+        self.submit_btn = QPushButton("CONNECT STREAMS")
+        self.submit_btn.clicked.connect(self.accept)
+        layout.addWidget(self.submit_btn)
+
+        self.setLayout(layout)
+
+    def _enforce_http_prefix(self, text):
+        # Prevent the user from deleting or modifying "http://"
+        if not text.startswith("http://"):
+            self.rover_input.blockSignals(True)
+            self.rover_input.setText("http://")
+            self.rover_input.setCursorPosition(len("http://"))
+            self.rover_input.blockSignals(False)
+
+    def get_sources(self):
+        # Parse Gesture Cam Source (Convert to int if standard index)
+        gesture_val = self.gesture_input.text().strip()
+        if gesture_val.isdigit():
+            gesture_source = int(gesture_val)
+        else:
+            gesture_source = gesture_val
+
+        # Parse Rover Cam URL
+        rover_source = self.rover_input.text().strip()
+
+        return gesture_source, rover_source
 
 
 class MADDashboard(QMainWindow):
@@ -46,9 +153,12 @@ class MADDashboard(QMainWindow):
         self.last_frame_time = time.time()
         self.current_payload = 'S'
 
-        # Camera Sources (Change index/URL here for DroidCam, Wi-Fi stream, or USB devices)
-        self.GESTURE_CAM_INDEX = 0  # Operator webcam
-        self.ROVER_CAM_INDEX = "http://100.91.87.88:8080"    # Rover stream index / IP Camera URL / DroidCam index
+        # Default Camera Sources
+        self.GESTURE_CAM_INDEX = 0
+        self.ROVER_CAM_INDEX = "http://100.91.87.88:8080"
+
+        # Prompt Modal Dialog for Sources
+        self.prompt_source_control()
 
         # 2. Build User Interface Layout
         self.init_ui()
@@ -61,6 +171,13 @@ class MADDashboard(QMainWindow):
         self.rover_thread = CameraThread(source=self.ROVER_CAM_INDEX, flip=True, detector=None)
         self.rover_thread.frame_processed.connect(self.update_rover_feed)
         self.rover_thread.start()
+
+    def prompt_source_control(self):
+        dialog = SourceControlDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            g_src, r_src = dialog.get_sources()
+            self.GESTURE_CAM_INDEX = g_src
+            self.ROVER_CAM_INDEX = r_src
 
     def init_ui(self):
         central_widget = QWidget()
