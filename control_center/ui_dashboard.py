@@ -72,7 +72,6 @@ class SourceControlDialog(QDialog):
         layout.setSpacing(15)
         layout.setContentsMargins(25, 25, 25, 25)
 
-        # Centered Heading with larger font size
         heading = QLabel("Source Control")
         heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
         heading.setFont(QFont('Segoe UI', 22, QFont.Weight.Bold))
@@ -109,7 +108,6 @@ class SourceControlDialog(QDialog):
         self.setLayout(layout)
 
     def _enforce_http_prefix(self, text):
-        # Prevent the user from deleting or modifying "http://"
         if not text.startswith("http://"):
             self.rover_input.blockSignals(True)
             self.rover_input.setText("http://")
@@ -117,14 +115,12 @@ class SourceControlDialog(QDialog):
             self.rover_input.blockSignals(False)
 
     def get_sources(self):
-        # Parse Gesture Cam Source (Convert to int if standard index)
         gesture_val = self.gesture_input.text().strip()
         if gesture_val.isdigit():
             gesture_source = int(gesture_val)
         else:
             gesture_source = gesture_val
 
-        # Parse Rover Cam URL
         rover_source = self.rover_input.text().strip()
 
         return gesture_source, rover_source
@@ -149,9 +145,10 @@ class MADDashboard(QMainWindow):
         self.sender = SerialSender()
         self.is_serial_connected = self.sender.connect()
 
-        # Telemetry
+        # Telemetry & Input Tracking
         self.last_frame_time = time.time()
         self.current_payload = 'S'
+        self.pressed_keys = set()  # Tracks held WASD keys
 
         # Default Camera Sources
         self.GESTURE_CAM_INDEX = 0
@@ -307,6 +304,68 @@ class MADDashboard(QMainWindow):
         main_vbox.addLayout(cameras_hbox, stretch=3)
         main_vbox.addLayout(self.telemetry_hbox, stretch=1)
 
+    # --- KEYBOARD CONTROLS ---
+    def keyPressEvent(self, event):
+        """Processes W, A, S, D key presses."""
+        if event.isAutoRepeat():
+            return  # Prevent OS key repeat flooding
+
+        key = event.key()
+        if key in (Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D):
+            self.pressed_keys.add(key)
+            self.process_keyboard_input()
+        else:
+            super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event):
+        """Processes key release events."""
+        if event.isAutoRepeat():
+            return
+
+        key = event.key()
+        if key in self.pressed_keys:
+            self.pressed_keys.remove(key)
+            self.process_keyboard_input()
+        else:
+            super().keyReleaseEvent(event)
+
+    def process_keyboard_input(self):
+        """Evaluates active held WASD keys into rover commands."""
+        has_w = Qt.Key.Key_W in self.pressed_keys
+        has_s = Qt.Key.Key_S in self.pressed_keys
+        has_a = Qt.Key.Key_A in self.pressed_keys
+        has_d = Qt.Key.Key_D in self.pressed_keys
+
+        cmd = "S"
+        if has_w:
+            if has_a:
+                cmd = "FL"
+            elif has_d:
+                cmd = "FR"
+            else:
+                cmd = "F"
+        elif has_s:
+            if has_a:
+                cmd = "BL"
+            elif has_d:
+                cmd = "BR"
+            else:
+                cmd = "B"
+
+        self.dispatch_command(cmd)
+
+    def dispatch_command(self, command):
+        """Sends payload down serial line and updates UI if command changed."""
+        if command != self.current_payload:
+            self.current_payload = command
+            self.payload_label.setText(command)
+
+            if self.is_serial_connected:
+                self.sender.send_command(command)
+                self.log_box.append(f"[TX] Command Sent: '{command}'")
+            else:
+                self.log_box.append(f"[LOCAL] Command Evaluated: '{command}' (Serial Offline)")
+
     def toggle_logs(self):
         is_expanded = self.log_box.isVisible()
         self.anim = QVariantAnimation(self)
@@ -352,18 +411,11 @@ class MADDashboard(QMainWindow):
                 )
             )
 
-        hands_data = self.detector.get_hand_info(raw_frame)
-        command = self.controller.get_command(hands_data)
-
-        if command != self.current_payload:
-            self.current_payload = command
-            self.payload_label.setText(command)
-
-            if self.is_serial_connected:
-                self.sender.send_command(command)
-                self.log_box.append(f"[TX] Command Sent: '{command}'")
-            else:
-                self.log_box.append(f"[LOCAL] Command Evaluated: '{command}' (Serial Offline)")
+        # Only evaluate gestures if NO keyboard keys are being pressed
+        if not self.pressed_keys:
+            hands_data = self.detector.get_hand_info(raw_frame)
+            command = self.controller.get_command(hands_data)
+            self.dispatch_command(command)
 
     def update_rover_feed(self, qt_image, raw_frame):
         label_size = self.rover_feed_label.size()
