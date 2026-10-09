@@ -2,7 +2,7 @@ import os
 import sys
 import time
 import cv2
-from PyQt6.QtCore import QEasingCurve, Qt, QVariantAnimation
+from PyQt6.QtCore import QEasingCurve, Qt, QTimer, QVariantAnimation
 from PyQt6.QtGui import QFont, QIcon, QPixmap, QImage
 from PyQt6.QtWidgets import (
     QDialog,
@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QPushButton,
+    QProgressBar,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -149,6 +150,7 @@ class MADDashboard(QMainWindow):
         self.last_frame_time = time.time()
         self.current_payload = 'S'
         self.pressed_keys = set()  # Tracks held WASD keys
+        self.last_radar_update_time = None
 
         # Default Camera Sources
         self.GESTURE_CAM_INDEX = 0
@@ -159,6 +161,11 @@ class MADDashboard(QMainWindow):
 
         # 2. Build User Interface Layout
         self.init_ui()
+
+        # Poll the existing serial connection without blocking the GUI thread.
+        self.radar_timer = QTimer(self)
+        self.radar_timer.timeout.connect(self.poll_radar_telemetry)
+        self.radar_timer.start(50)
 
         # 3. Initialize Camera Threads
         self.gesture_thread = CameraThread(source=self.GESTURE_CAM_INDEX, flip=True, detector=self.detector)
@@ -271,6 +278,42 @@ class MADDashboard(QMainWindow):
         payload_vbox.addWidget(self.payload_label)
         self.payload_box.setLayout(payload_vbox)
 
+        self.radar_box = QGroupBox('ULTRASONIC RANGE')
+        radar_vbox = QVBoxLayout()
+        radar_vbox.setSpacing(6)
+        radar_vbox.setContentsMargins(12, 16, 12, 10)
+
+        self.radar_distance_label = QLabel('-- cm')
+        self.radar_distance_label.setFont(QFont('Segoe UI', 30, QFont.Weight.Bold))
+        self.radar_distance_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.radar_distance_label.setStyleSheet(
+            'color: #00E5FF; background-color: #0B0D12; border: 1px solid #2A2F3D; border-radius: 10px;'
+        )
+
+        self.radar_angle_label = QLabel('SWEEP ANGLE: --°')
+        self.radar_angle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.radar_angle_label.setStyleSheet('color: #8A9AB8; font-size: 10px;')
+
+        self.radar_range_bar = QProgressBar()
+        self.radar_range_bar.setRange(0, 400)
+        self.radar_range_bar.setValue(0)
+        self.radar_range_bar.setTextVisible(False)
+        self.radar_range_bar.setFixedHeight(9)
+        self.radar_range_bar.setStyleSheet(
+            'QProgressBar { background: #07090D; border: 1px solid #2A2F3D; border-radius: 4px; }'
+            'QProgressBar::chunk { background: #00E5FF; border-radius: 3px; }'
+        )
+
+        self.radar_status_label = QLabel('WAITING FOR RADAR DATA')
+        self.radar_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.radar_status_label.setStyleSheet('color: #FFCC00; font-size: 10px; font-weight: bold;')
+
+        radar_vbox.addWidget(self.radar_distance_label, stretch=2)
+        radar_vbox.addWidget(self.radar_angle_label)
+        radar_vbox.addWidget(self.radar_range_bar)
+        radar_vbox.addWidget(self.radar_status_label)
+        self.radar_box.setLayout(radar_vbox)
+
         self.status_card_box = QGroupBox('FEED STATUS')
         status_card_vbox = QVBoxLayout()
         self.status_card_label = QLabel(
@@ -296,6 +339,7 @@ class MADDashboard(QMainWindow):
 
         self.telemetry_hbox.addWidget(self.link_box, stretch=100)
         self.telemetry_hbox.addWidget(self.payload_box, stretch=100)
+        self.telemetry_hbox.addWidget(self.radar_box, stretch=100)
         self.telemetry_hbox.addWidget(self.status_card_box, stretch=100)
         self.telemetry_hbox.addWidget(self.log_box_group, stretch=100)
 
@@ -388,11 +432,46 @@ class MADDashboard(QMainWindow):
 
     def update_bottom_row_stretches(self, log_stretch_val):
         log_stretch = int(log_stretch_val)
-        card_stretch = max(50, int((400 - log_stretch) / 3))
+        card_stretch = max(40, int((500 - log_stretch) / 4))
         self.telemetry_hbox.setStretch(0, card_stretch)
         self.telemetry_hbox.setStretch(1, card_stretch)
         self.telemetry_hbox.setStretch(2, card_stretch)
-        self.telemetry_hbox.setStretch(3, log_stretch)
+        self.telemetry_hbox.setStretch(3, card_stretch)
+        self.telemetry_hbox.setStretch(4, log_stretch)
+
+    def poll_radar_telemetry(self):
+        """Read tagged distance samples from the transmitter's USB serial stream."""
+        for angle, distance_cm in self.sender.read_radar_telemetry():
+            self.last_radar_update_time = time.monotonic()
+            self.radar_distance_label.setText(f'{distance_cm} cm')
+            self.radar_angle_label.setText(f'SWEEP ANGLE: {angle}°')
+            self.radar_range_bar.setValue(distance_cm)
+
+            if distance_cm >= 400:
+                status = 'NO ECHO / OUT OF RANGE'
+                color = '#FFCC00'
+            else:
+                status = 'RADAR LIVE'
+                color = '#00E676'
+            self.radar_status_label.setText(status)
+            self.radar_status_label.setStyleSheet(
+                f'color: {color}; font-size: 10px; font-weight: bold;'
+            )
+
+        if self.last_radar_update_time is None:
+            if not self.is_serial_connected:
+                self.radar_status_label.setText('SERIAL LINK OFFLINE')
+            return
+
+        if time.monotonic() - self.last_radar_update_time > 1.5:
+            self.last_radar_update_time = None
+            self.radar_distance_label.setText('-- cm')
+            self.radar_angle_label.setText('SWEEP ANGLE: --°')
+            self.radar_range_bar.setValue(0)
+            self.radar_status_label.setText('NO RADAR DATA')
+            self.radar_status_label.setStyleSheet(
+                'color: #FF1744; font-size: 10px; font-weight: bold;'
+            )
 
     def update_gesture_feed(self, qt_image, raw_frame):
         now = time.time()

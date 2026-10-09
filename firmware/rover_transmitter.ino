@@ -8,11 +8,19 @@
 // Receiver MAC Address
 uint8_t receiverAddress[] = {0x1C, 0xC3, 0xAB, 0xB3, 0xC6, 0x48};
 
-// --- TELEMETRY STRUCT ---
+// --- COMMAND AND TELEMETRY STRUCTS ---
 typedef struct GestureMessage {
   char command[4];  // Movement command (e.g., "F", "BL", "S")
   uint8_t speed;    // Motor speed (100 - 255 PWM)
 } GestureMessage;
+
+static const uint8_t RADAR_PACKET_MARKER = 0xA7;
+
+typedef struct __attribute__((packed)) RadarTelemetry {
+  uint8_t marker;
+  int16_t angleDeg;
+  uint16_t distanceCm;
+} RadarTelemetry;
 
 GestureMessage outgoingData;
 esp_now_peer_info_t peerInfo;
@@ -24,6 +32,23 @@ void OnDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 #endif
   // Status check if needed: status == ESP_NOW_SEND_SUCCESS
+}
+
+// Receiver-to-transmitter sensor return path. The marker and fixed packet
+// length keep radar messages distinct from any unexpected ESP-NOW payload.
+#if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
+void OnDataRecv(const esp_now_recv_info *info, const uint8_t *incomingDataBytes, int len) {
+#else
+void OnDataRecv(const uint8_t *mac, const uint8_t *incomingDataBytes, int len) {
+#endif
+  if (!incomingDataBytes || len != (int)sizeof(RadarTelemetry)) return;
+
+  RadarTelemetry telemetry;
+  memcpy(&telemetry, incomingDataBytes, sizeof(telemetry));
+  if (telemetry.marker != RADAR_PACKET_MARKER) return;
+
+  // Machine-readable line consumed by control_center/serial_sender.py.
+  Serial.printf("RADAR:%d:%u\n", (int)telemetry.angleDeg, (unsigned int)telemetry.distanceCm);
 }
 
 void setup() {
@@ -39,12 +64,13 @@ void setup() {
   }
 
   esp_now_register_send_cb(OnDataSent);
+  esp_now_register_recv_cb(OnDataRecv);
 
   // Register peer (Receiver)
   memcpy(peerInfo.peer_addr, receiverAddress, 6);
-  peerInfo.channel = 0;  
+  peerInfo.channel = 0;
   peerInfo.encrypt = false;
-  
+
   if (esp_now_add_peer(&peerInfo) != ESP_OK) {
     Serial.println("Failed to add Receiver peer");
     return;
@@ -71,8 +97,8 @@ void loop() {
       inputCommand.toCharArray(outgoingData.command, sizeof(outgoingData.command));
 
       // Send structured payload via ESP-NOW
-      esp_err_t result = esp_now_send(receiverAddress, (uint8_t *) &outgoingData, sizeof(outgoingData));
-      
+      esp_err_t result = esp_now_send(receiverAddress, (uint8_t *)&outgoingData, sizeof(outgoingData));
+
       if (result == ESP_OK) {
         Serial.printf("[TX] Sent: %s | Speed: %d\n", outgoingData.command, outgoingData.speed);
       }
