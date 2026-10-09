@@ -1,9 +1,11 @@
 import os
 import sys
 import time
+import math
 import cv2
 from PyQt6.QtCore import QEasingCurve, Qt, QTimer, QVariantAnimation
-from PyQt6.QtGui import QFont, QIcon, QPixmap, QImage
+from PyQt6.QtCore import QPointF
+from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QImage
 from PyQt6.QtWidgets import (
     QDialog,
     QGroupBox,
@@ -12,7 +14,6 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QPushButton,
-    QProgressBar,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -125,6 +126,137 @@ class SourceControlDialog(QDialog):
         rover_source = self.rover_input.text().strip()
 
         return gesture_source, rover_source
+
+
+class RadarDisplayWidget(QWidget):
+    """Paint a live 180-degree radar with short-lived object returns."""
+
+    MAX_RANGE_CM = 400
+    RETURN_HOLD_SECONDS = 3.2
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(320, 190)
+        self.current_angle = 90
+        self.current_distance_cm = None
+        self.status_text = 'WAITING FOR RADAR DATA'
+        self.status_color = '#FFCC00'
+        self.return_points = {}
+
+    @staticmethod
+    def _point_at(center_x, baseline_y, radius, angle_degrees, distance_ratio=1.0):
+        angle = math.radians(angle_degrees)
+        scaled_radius = radius * distance_ratio
+        return QPointF(
+            center_x + scaled_radius * math.cos(angle),
+            baseline_y - scaled_radius * math.sin(angle),
+        )
+
+    def add_reading(self, angle, distance_cm):
+        now = time.monotonic()
+        self.current_angle = max(0, min(180, int(angle)))
+        self.current_distance_cm = max(0, min(self.MAX_RANGE_CM, int(distance_cm)))
+
+        if 0 < self.current_distance_cm < self.MAX_RANGE_CM:
+            # One stored return per servo angle; fade it until a later sweep refreshes it.
+            self.return_points[self.current_angle] = (self.current_distance_cm, now)
+
+        self.set_status(
+            'NO ECHO / OUT OF RANGE' if self.current_distance_cm >= self.MAX_RANGE_CM else 'RADAR LIVE',
+            '#FFCC00' if self.current_distance_cm >= self.MAX_RANGE_CM else '#00E676',
+        )
+        self.update()
+
+    def set_status(self, text, color):
+        if self.status_text != text or self.status_color != color:
+            self.status_text = text
+            self.status_color = color
+            self.update()
+
+    def mark_stale(self):
+        self.current_distance_cm = None
+        self.set_status('NO RADAR DATA', '#FF1744')
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.fillRect(self.rect(), QColor('#0B0D12'))
+
+        width = self.width()
+        height = self.height()
+        center_x = width / 2.0
+        baseline_y = height - 27.0
+        radius = max(20.0, min((width - 52.0) / 2.0, height - 78.0))
+
+        painter.setFont(QFont('Consolas', 9, QFont.Weight.Bold))
+        painter.setPen(QColor('#C3CEE0'))
+        painter.drawText(12, 16, f'ANGLE {self.current_angle:03d}°')
+        if self.current_distance_cm is None:
+            range_text = 'RANGE --'
+        elif self.current_distance_cm >= self.MAX_RANGE_CM:
+            range_text = 'RANGE NO ECHO'
+        else:
+            range_text = f'RANGE {self.current_distance_cm} cm'
+        painter.drawText(max(12, width - 150), 16, range_text)
+        painter.setPen(QColor(self.status_color))
+        painter.drawText(12, 34, self.status_text)
+
+        # Reference-style semicircular range arcs and angle spokes.
+        painter.setPen(QPen(QColor(0, 229, 255, 85), 1))
+        for range_cm in range(100, self.MAX_RANGE_CM + 1, 100):
+            ring_radius = radius * range_cm / self.MAX_RANGE_CM
+            path = QPainterPath()
+            for degree in range(181):
+                point = self._point_at(center_x, baseline_y, ring_radius, degree)
+                if degree == 0:
+                    path.moveTo(point)
+                else:
+                    path.lineTo(point)
+            painter.drawPath(path)
+            painter.setPen(QColor('#57AFA8'))
+            painter.drawText(int(center_x + 7), int(baseline_y - ring_radius - 3), f'{range_cm}')
+            painter.setPen(QPen(QColor(0, 229, 255, 85), 1))
+
+        for degree in range(0, 181, 30):
+            endpoint = self._point_at(center_x, baseline_y, radius, degree)
+            painter.drawLine(QPointF(center_x, baseline_y), endpoint)
+            label_point = self._point_at(center_x, baseline_y, radius + 13, degree)
+            painter.setPen(QColor('#8A9AB8'))
+            painter.drawText(int(label_point.x() - 12), int(label_point.y() + 4), f'{degree}°')
+            painter.setPen(QPen(QColor(0, 229, 255, 85), 1))
+
+        painter.drawLine(
+            QPointF(center_x - radius, baseline_y),
+            QPointF(center_x + radius, baseline_y),
+        )
+
+        # Remove expired echoes and paint the remaining points with a fading red return trail.
+        now = time.monotonic()
+        for angle, (distance_cm, seen_at) in list(self.return_points.items()):
+            age = now - seen_at
+            if age >= self.RETURN_HOLD_SECONDS:
+                del self.return_points[angle]
+                continue
+            opacity = max(35, int(230 * (1.0 - age / self.RETURN_HOLD_SECONDS)))
+            point = self._point_at(
+                center_x,
+                baseline_y,
+                radius,
+                angle,
+                distance_cm / self.MAX_RANGE_CM,
+            )
+            color = QColor(255, 66, 72, opacity)
+            painter.setPen(QPen(color, 1))
+            painter.setBrush(color)
+            painter.drawEllipse(point, 5.0, 5.0)
+
+        # Current servo direction is the bright moving scan line.
+        sweep_endpoint = self._point_at(center_x, baseline_y, radius, self.current_angle)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(0, 229, 255, 75), 5))
+        painter.drawLine(QPointF(center_x, baseline_y), sweep_endpoint)
+        painter.setPen(QPen(QColor('#00E5FF'), 2))
+        painter.drawLine(QPointF(center_x, baseline_y), sweep_endpoint)
 
 
 class MADDashboard(QMainWindow):
@@ -278,40 +410,11 @@ class MADDashboard(QMainWindow):
         payload_vbox.addWidget(self.payload_label)
         self.payload_box.setLayout(payload_vbox)
 
-        self.radar_box = QGroupBox('ULTRASONIC RANGE')
+        self.radar_box = QGroupBox('ULTRASONIC RADAR • 0–400 CM')
         radar_vbox = QVBoxLayout()
-        radar_vbox.setSpacing(6)
-        radar_vbox.setContentsMargins(12, 16, 12, 10)
-
-        self.radar_distance_label = QLabel('-- cm')
-        self.radar_distance_label.setFont(QFont('Segoe UI', 30, QFont.Weight.Bold))
-        self.radar_distance_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.radar_distance_label.setStyleSheet(
-            'color: #00E5FF; background-color: #0B0D12; border: 1px solid #2A2F3D; border-radius: 10px;'
-        )
-
-        self.radar_angle_label = QLabel('SWEEP ANGLE: --°')
-        self.radar_angle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.radar_angle_label.setStyleSheet('color: #8A9AB8; font-size: 10px;')
-
-        self.radar_range_bar = QProgressBar()
-        self.radar_range_bar.setRange(0, 400)
-        self.radar_range_bar.setValue(0)
-        self.radar_range_bar.setTextVisible(False)
-        self.radar_range_bar.setFixedHeight(9)
-        self.radar_range_bar.setStyleSheet(
-            'QProgressBar { background: #07090D; border: 1px solid #2A2F3D; border-radius: 4px; }'
-            'QProgressBar::chunk { background: #00E5FF; border-radius: 3px; }'
-        )
-
-        self.radar_status_label = QLabel('WAITING FOR RADAR DATA')
-        self.radar_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.radar_status_label.setStyleSheet('color: #FFCC00; font-size: 10px; font-weight: bold;')
-
-        radar_vbox.addWidget(self.radar_distance_label, stretch=2)
-        radar_vbox.addWidget(self.radar_angle_label)
-        radar_vbox.addWidget(self.radar_range_bar)
-        radar_vbox.addWidget(self.radar_status_label)
+        radar_vbox.setContentsMargins(8, 12, 8, 8)
+        self.radar_widget = RadarDisplayWidget()
+        radar_vbox.addWidget(self.radar_widget, stretch=1)
         self.radar_box.setLayout(radar_vbox)
 
         self.status_card_box = QGroupBox('FEED STATUS')
@@ -344,8 +447,9 @@ class MADDashboard(QMainWindow):
         self.telemetry_hbox.addWidget(self.log_box_group, stretch=100)
 
         self.log_box.setVisible(False)
+        self.update_bottom_row_stretches(100)
 
-        main_vbox.addLayout(cameras_hbox, stretch=3)
+        main_vbox.addLayout(cameras_hbox, stretch=2)
         main_vbox.addLayout(self.telemetry_hbox, stretch=1)
 
     # --- KEYBOARD CONTROLS ---
@@ -432,46 +536,30 @@ class MADDashboard(QMainWindow):
 
     def update_bottom_row_stretches(self, log_stretch_val):
         log_stretch = int(log_stretch_val)
-        card_stretch = max(40, int((500 - log_stretch) / 4))
+        card_stretch = max(40, int((620 - log_stretch) / 5.2))
         self.telemetry_hbox.setStretch(0, card_stretch)
         self.telemetry_hbox.setStretch(1, card_stretch)
-        self.telemetry_hbox.setStretch(2, card_stretch)
+        self.telemetry_hbox.setStretch(2, int(card_stretch * 2.2))
         self.telemetry_hbox.setStretch(3, card_stretch)
         self.telemetry_hbox.setStretch(4, log_stretch)
 
     def poll_radar_telemetry(self):
-        """Read tagged distance samples from the transmitter's USB serial stream."""
+        """Feed tagged angle/distance samples into the radar display."""
         for angle, distance_cm in self.sender.read_radar_telemetry():
             self.last_radar_update_time = time.monotonic()
-            self.radar_distance_label.setText(f'{distance_cm} cm')
-            self.radar_angle_label.setText(f'SWEEP ANGLE: {angle}°')
-            self.radar_range_bar.setValue(distance_cm)
-
-            if distance_cm >= 400:
-                status = 'NO ECHO / OUT OF RANGE'
-                color = '#FFCC00'
-            else:
-                status = 'RADAR LIVE'
-                color = '#00E676'
-            self.radar_status_label.setText(status)
-            self.radar_status_label.setStyleSheet(
-                f'color: {color}; font-size: 10px; font-weight: bold;'
-            )
+            self.radar_widget.add_reading(angle, distance_cm)
 
         if self.last_radar_update_time is None:
             if not self.is_serial_connected:
-                self.radar_status_label.setText('SERIAL LINK OFFLINE')
-            return
-
-        if time.monotonic() - self.last_radar_update_time > 1.5:
+                self.radar_widget.set_status('SERIAL LINK OFFLINE', '#FF1744')
+            elif self.radar_widget.status_text == 'SERIAL LINK OFFLINE':
+                self.radar_widget.set_status('WAITING FOR RADAR DATA', '#FFCC00')
+        elif time.monotonic() - self.last_radar_update_time > 1.5:
             self.last_radar_update_time = None
-            self.radar_distance_label.setText('-- cm')
-            self.radar_angle_label.setText('SWEEP ANGLE: --°')
-            self.radar_range_bar.setValue(0)
-            self.radar_status_label.setText('NO RADAR DATA')
-            self.radar_status_label.setStyleSheet(
-                'color: #FF1744; font-size: 10px; font-weight: bold;'
-            )
+            self.radar_widget.mark_stale()
+
+        # Keep the fading return trail animated between serial packets.
+        self.radar_widget.update()
 
     def update_gesture_feed(self, qt_image, raw_frame):
         now = time.time()
