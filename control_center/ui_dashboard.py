@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QProgressBar,
+    QSlider,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -314,17 +315,57 @@ class MADDashboard(QMainWindow):
         radar_vbox.addWidget(self.radar_status_label)
         self.radar_box.setLayout(radar_vbox)
 
-        self.status_card_box = QGroupBox('FEED STATUS')
-        status_card_vbox = QVBoxLayout()
-        self.status_card_label = QLabel(
-            'VIDEO STREAM<br><b style="font-size: 18px; color: #00E5FF;">ONLINE</b>'
+        self.speed_box = QGroupBox('ROVER SPEED')
+        speed_vbox = QVBoxLayout()
+        speed_vbox.setSpacing(6)
+        speed_vbox.setContentsMargins(12, 16, 12, 10)
+
+        self.speed_sub = QLabel('DRIVE SPEED LIMIT')
+        self.speed_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.speed_sub.setStyleSheet('color: #6C7A9C; font-size: 10px;')
+
+        self.speed_value_label = QLabel('68%')
+        self.speed_value_label.setFont(QFont('Segoe UI', 30, QFont.Weight.Bold))
+        self.speed_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.speed_value_label.setStyleSheet(
+            'color: #00E5FF; background-color: #0B0D12; border: 1px solid #2A2F3D; border-radius: 10px;'
         )
-        self.status_card_label.setTextFormat(Qt.TextFormat.RichText)
-        self.status_card_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        status_card_vbox.addStretch()
-        status_card_vbox.addWidget(self.status_card_label)
-        status_card_vbox.addStretch()
-        self.status_card_box.setLayout(status_card_vbox)
+
+        speed_scale_hbox = QHBoxLayout()
+        speed_scale_hbox.setContentsMargins(0, 0, 0, 0)
+        speed_slow_label = QLabel('SLOW')
+        speed_slow_label.setStyleSheet('color: #8A9AB8; font-size: 10px;')
+        speed_fast_label = QLabel('FAST')
+        speed_fast_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        speed_fast_label.setStyleSheet('color: #8A9AB8; font-size: 10px;')
+        speed_scale_hbox.addWidget(speed_slow_label)
+        speed_scale_hbox.addStretch()
+        speed_scale_hbox.addWidget(speed_fast_label)
+
+        self.speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self.speed_slider.setRange(0, 100)
+        self.speed_slider.setValue(68)
+        self.speed_pwm = round(68 * 255 / 100)
+        self.speed_slider.setTickPosition(QSlider.TickPosition.NoTicks)
+        self.speed_slider.setStyleSheet(
+            'QSlider::groove:horizontal { background: #07090D; border: 1px solid #2A2F3D; height: 8px; border-radius: 4px; }'
+            'QSlider::sub-page:horizontal { background: #00E5FF; border-radius: 4px; }'
+            'QSlider::add-page:horizontal { background: #07090D; border-radius: 4px; }'
+            'QSlider::handle:horizontal { background: #00E5FF; border: 3px solid #0B0D12; min-width: 18px; max-width: 18px; min-height: 18px; max-height: 18px; margin: -6px 0; border-radius: 12px; }'
+            'QSlider::handle:horizontal:hover { background: #66F2FF; border-radius: 12px; }'
+        )
+        self.speed_slider.valueChanged.connect(self.update_speed_display)
+
+        self.speed_status_label = QLabel('READY FOR INPUT')
+        self.speed_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.speed_status_label.setStyleSheet('color: #FFCC00; font-size: 10px; font-weight: bold;')
+
+        speed_vbox.addWidget(self.speed_sub)
+        speed_vbox.addWidget(self.speed_value_label)
+        speed_vbox.addLayout(speed_scale_hbox)
+        speed_vbox.addWidget(self.speed_slider)
+        speed_vbox.addWidget(self.speed_status_label)
+        self.speed_box.setLayout(speed_vbox)
 
         self.log_box_group = QGroupBox('SYS LOGS')
         log_vbox = QVBoxLayout()
@@ -340,7 +381,7 @@ class MADDashboard(QMainWindow):
         self.telemetry_hbox.addWidget(self.link_box, stretch=100)
         self.telemetry_hbox.addWidget(self.payload_box, stretch=100)
         self.telemetry_hbox.addWidget(self.radar_box, stretch=100)
-        self.telemetry_hbox.addWidget(self.status_card_box, stretch=100)
+        self.telemetry_hbox.addWidget(self.speed_box, stretch=100)
         self.telemetry_hbox.addWidget(self.log_box_group, stretch=100)
 
         self.log_box.setVisible(False)
@@ -405,7 +446,7 @@ class MADDashboard(QMainWindow):
             self.payload_label.setText(command)
 
             if self.is_serial_connected:
-                self.sender.send_command(command)
+                self.sender.send_command(command, self.speed_pwm)
                 self.log_box.append(f"[TX] Command Sent: '{command}'")
             else:
                 self.log_box.append(f"[LOCAL] Command Evaluated: '{command}' (Serial Offline)")
@@ -429,6 +470,13 @@ class MADDashboard(QMainWindow):
 
         self.anim.valueChanged.connect(self.update_bottom_row_stretches)
         self.anim.start()
+
+    def update_speed_display(self, value):
+        """Update the display and resend the active command at the new PWM speed."""
+        self.speed_pwm = round(value * 255 / 100)
+        self.speed_value_label.setText(f'{value}%')
+        if self.is_serial_connected:
+            self.sender.send_command(self.current_payload, self.speed_pwm)
 
     def update_bottom_row_stretches(self, log_stretch_val):
         log_stretch = int(log_stretch_val)

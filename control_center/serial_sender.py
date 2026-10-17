@@ -48,7 +48,7 @@ class SerialSender:
             self._receive_buffer.clear()
             # Give the ESP32 time to reboot and initialize ESP-NOW after the serial line opens.
             time.sleep(2)
-            self.send_command("S")
+            self.send_command("S", 0)
             print(f"✅ Successfully linked to ESP32 on {self.port}")
             return True
         except serial.SerialException as e:
@@ -56,10 +56,11 @@ class SerialSender:
             self.ser = None
             return False
 
-    def send_command(self, command_str):
-        """Encodes and pushes the lightweight steering/pedal code down the wire."""
+    def send_command(self, command_str, speed=0):
+        """Send COMMAND:SPEED for the transmitter's ESP-NOW GestureMessage."""
         if self.ser and self.ser.is_open:
-            packet = f"{command_str}\n".encode("utf-8")
+            speed_value = max(0, min(255, int(speed)))
+            packet = f"{command_str}:{speed_value}\n".encode("utf-8")
             self.ser.write(packet)
         else:
             print("⚠️ Warning: Serial line dropped or not open. Transmission skipped.")
