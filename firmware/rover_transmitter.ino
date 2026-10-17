@@ -2,16 +2,12 @@
 #include <WiFi.h>
 #include <esp_arduino_version.h>
 
-// --- PIN DEFINITION ---
-#define POT_PIN 34 // Pin labeled 'VP' on your 30-pin board
-
 // Receiver MAC Address
 uint8_t receiverAddress[] = {0x1C, 0xC3, 0xAB, 0xB3, 0xC6, 0x48};
 
-// --- COMMAND AND TELEMETRY STRUCTS ---
+// --- COMMAND STRUCT (NO SPEED VARIABLE) ---
 typedef struct GestureMessage {
   char command[4];  // Movement command (e.g., "F", "BL", "S")
-  uint8_t speed;    // Motor speed (100 - 255 PWM)
 } GestureMessage;
 
 static const uint8_t RADAR_PACKET_MARKER = 0xA7;
@@ -25,17 +21,16 @@ typedef struct __attribute__((packed)) RadarTelemetry {
 GestureMessage outgoingData;
 esp_now_peer_info_t peerInfo;
 
-// --- ESP-NOW SEND CALLBACK (ESP32 CORE 3.X COMPATIBLE) ---
+// --- ESP-NOW SEND CALLBACK ---
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
 void OnDataSent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
 #else
 void OnDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
 #endif
-  // Status check if needed: status == ESP_NOW_SEND_SUCCESS
+  // Optional status tracking
 }
 
-// Receiver-to-transmitter sensor return path. The marker and fixed packet
-// length keep radar messages distinct from any unexpected ESP-NOW payload.
+// Receiver-to-transmitter sensor return path for Python dashboard telemetry
 #if ESP_ARDUINO_VERSION >= ESP_ARDUINO_VERSION_VAL(3, 0, 0)
 void OnDataRecv(const esp_now_recv_info *info, const uint8_t *incomingDataBytes, int len) {
 #else
@@ -47,13 +42,12 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingDataBytes, int len) {
   memcpy(&telemetry, incomingDataBytes, sizeof(telemetry));
   if (telemetry.marker != RADAR_PACKET_MARKER) return;
 
-  // Machine-readable line consumed by control_center/serial_sender.py.
+  // Machine-readable output for Python logging/UI
   Serial.printf("RADAR:%d:%u\n", (int)telemetry.angleDeg, (unsigned int)telemetry.distanceCm);
 }
 
 void setup() {
   Serial.begin(115200);
-  pinMode(POT_PIN, INPUT);
 
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -80,15 +74,7 @@ void setup() {
 }
 
 void loop() {
-  // 1. Read Potentiometer on 'VP' (GPIO 34) and map to PWM Speed Range (100-255)
-  int rawPot = analogRead(POT_PIN);
-  outgoingData.speed = map(rawPot, 0, 4095, 100, 255);
-
-  // --- DEBUG PRINT: Shows reading in Serial Monitor continuously ---
-  Serial.printf("Raw ADC (VP): %d | Speed: %d\n", rawPot, outgoingData.speed);
-  delay(150);
-
-  // 2. Process incoming Serial command from Python
+  // Read directional command strings from Serial
   if (Serial.available() > 0) {
     String inputCommand = Serial.readStringUntil('\n');
     inputCommand.trim();
@@ -96,11 +82,11 @@ void loop() {
     if (inputCommand.length() > 0 && inputCommand.length() < 4) {
       inputCommand.toCharArray(outgoingData.command, sizeof(outgoingData.command));
 
-      // Send structured payload via ESP-NOW
+      // Send structured command over ESP-NOW
       esp_err_t result = esp_now_send(receiverAddress, (uint8_t *)&outgoingData, sizeof(outgoingData));
 
       if (result == ESP_OK) {
-        Serial.printf("[TX] Sent: %s | Speed: %d\n", outgoingData.command, outgoingData.speed);
+        Serial.printf("[TX] Sent Command: %s\n", outgoingData.command);
       }
     }
   }
