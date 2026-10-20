@@ -47,13 +47,19 @@ GestureMessage incomingData;
 
 // Drive direction pins HIGH/LOW and drive ENA/ENB with PWM speed
 void setMotorSpeedAndDirection(int in1, int in2, int in3, int in4, uint8_t speed) {
+  // Enforce a minimum speed floor (110 PWM) when non-zero to overcome L298N internal drop
+  uint8_t effectiveSpeed = 0;
+  if (speed > 0) {
+    effectiveSpeed = (speed < 110) ? 110 : speed;
+  }
+
   digitalWrite(IN1, in1 ? HIGH : LOW);
   digitalWrite(IN2, in2 ? HIGH : LOW);
   digitalWrite(IN3, in3 ? HIGH : LOW);
   digitalWrite(IN4, in4 ? HIGH : LOW);
 
-  analogWrite(ENA_PIN, speed);
-  analogWrite(ENB_PIN, speed);
+  analogWrite(ENA_PIN, effectiveSpeed);
+  analogWrite(ENB_PIN, effectiveSpeed);
 }
 
 // 4WD tank steering directional mappings
@@ -155,7 +161,13 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingDataBytes, int len) {
 void setup() {
   Serial.begin(115200);
 
-  // Motor Pins
+  // 1. ALLOCATE TIMER 3 & ATTACH SERVO FIRST (Before any analogWrite calls)
+  ESP32PWM::allocateTimer(3);
+  radarServo.setPeriodHertz(50);
+  radarServo.attach(SERVO_PIN, 500, 2400);
+  radarServo.write(90);
+
+  // 2. Motor Pins & Initial State
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT);
@@ -164,17 +176,11 @@ void setup() {
   pinMode(ENB_PIN, OUTPUT);
   stopMotors();
 
-  // Radar Pins
+  // 3. Radar Sensor Pins
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
 
-  // SG90 Servo
-  ESP32PWM::allocateTimer(0);
-  radarServo.setPeriodHertz(50);
-  radarServo.attach(SERVO_PIN, 500, 2400);
-  radarServo.write(90);
-
-  // ESP-NOW Setup
+  // 4. ESP-NOW Setup
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
 
