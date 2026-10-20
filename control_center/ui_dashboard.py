@@ -1,16 +1,20 @@
 import os
 import sys
 import time
+from urllib.parse import urlsplit
 import cv2
-from PyQt6.QtCore import QEasingCurve, Qt, QTimer, QVariantAnimation
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSettings
 from PyQt6.QtGui import QFont, QIcon, QPixmap, QImage
 from PyQt6.QtWidgets import (
     QDialog,
+    QDockWidget,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QProgressBar,
     QSlider,
@@ -27,12 +31,32 @@ from serial_sender import SerialSender
 from stream_manager import CameraThread
 
 
+class SerialConnectWorker(QThread):
+    """Keep serial discovery and the ESP32 reboot wait off the GUI thread."""
+
+    connection_finished = pyqtSignal(bool, str)
+
+    def __init__(self, sender, parent=None):
+        super().__init__(parent)
+        self.sender = sender
+
+    def run(self):
+        try:
+            connected = self.sender.connect()
+            detail = self.sender.port or ''
+        except Exception as exc:
+            connected = False
+            detail = str(exc)
+        self.connection_finished.emit(connected, detail)
+
+
 class SourceControlDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Source Control Configuration")
-        self.setFixedSize(450, 500)
+        self.setFixedSize(520, 710)
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.qr_settings = QSettings("Manus", "ManusADLunam")
 
         self.setStyleSheet("""
             QDialog {
@@ -71,8 +95,8 @@ class SourceControlDialog(QDialog):
         """)
 
         layout = QVBoxLayout()
-        layout.setSpacing(15)
-        layout.setContentsMargins(25, 25, 25, 25)
+        layout.setSpacing(12)
+        layout.setContentsMargins(20, 20, 20, 20)
 
         heading = QLabel("Source Control")
         heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -89,41 +113,131 @@ class SourceControlDialog(QDialog):
         layout.addSpacing(10)
 
         # 2. Rover Cam Input
-        rover_label = QLabel("Please enter the IP and Port as given in the LRS android app.")
+        rover_label = QLabel(
+            "Gesture source: camera index or stream URL. Rover stream: http(s) or RTSP URL; leave blank to skip."
+        )
         rover_label.setWordWrap(True)
         self.rover_input = QLineEdit()
-        
-        # Pre-fill with http://xxx.xx.xx.xxx:xxxx
-        self.rover_input.setText("http://xxx.xx.xx.xxx:xxxx")
-        self.rover_input.textChanged.connect(self._enforce_http_prefix)
-        
+        self.rover_input.setPlaceholderText("http://192.168.1.20:8080")
+
         layout.addWidget(rover_label)
         layout.addWidget(self.rover_input)
+
+        qr_heading = QLabel("MOBILE APP CONNECTION QR")
+        qr_heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        qr_heading.setStyleSheet("color: #00E5FF; font-weight: bold; margin-top: 4px;")
+        layout.addWidget(qr_heading)
+
+        self.qr_preview = QLabel("No static QR image loaded")
+        self.qr_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.qr_preview.setWordWrap(True)
+        self.qr_preview.setFixedSize(200, 200)
+        self.qr_preview.setStyleSheet(
+            "background-color: #FFFFFF; color: #5B6475; border: 2px solid #2A2F3D; border-radius: 8px;"
+        )
+        layout.addWidget(self.qr_preview, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        self.qr_path_label = QLabel("Choose the static QR image supplied for the mobile app.")
+        self.qr_path_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.qr_path_label.setWordWrap(True)
+        self.qr_path_label.setStyleSheet("color: #8A9AB8; font-size: 10px;")
+        layout.addWidget(self.qr_path_label)
+
+        self.load_qr_btn = QPushButton("LOAD STATIC QR IMAGE")
+        self.load_qr_btn.clicked.connect(self.choose_qr_image)
+        layout.addWidget(self.load_qr_btn)
+
+        qr_note = QLabel("Displays the image only; it does not generate or verify the QR contents.")
+        qr_note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        qr_note.setWordWrap(True)
+        qr_note.setStyleSheet("color: #6C7A9C; font-size: 10px;")
+        layout.addWidget(qr_note)
+
+        saved_qr_path = self.qr_settings.value("mobile_app_qr_path", "") or ""
+        if saved_qr_path and os.path.isfile(saved_qr_path):
+            self.set_qr_image(saved_qr_path, persist=False)
 
         layout.addStretch()
 
         # Connect / Confirm Button
         self.submit_btn = QPushButton("CONNECT STREAMS")
-        self.submit_btn.clicked.connect(self.accept)
+        self.submit_btn.clicked.connect(self.validate_and_accept)
         layout.addWidget(self.submit_btn)
 
         self.setLayout(layout)
 
-    def _enforce_http_prefix(self, text):
-        if not text.startswith("http://"):
-            self.rover_input.blockSignals(True)
-            self.rover_input.setText("http://")
-            self.rover_input.setCursorPosition(len("http://"))
-            self.rover_input.blockSignals(False)
+    def choose_qr_image(self):
+        """Select and preview a user-created static QR image."""
+        initial_path = self.qr_settings.value("mobile_app_qr_path", "") or ""
+        image_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select the mobile app QR image",
+            initial_path if os.path.isfile(initial_path) else "",
+            "Image files (*.png *.jpg *.jpeg *.bmp)",
+        )
+        if image_path:
+            self.set_qr_image(image_path)
+
+    def set_qr_image(self, image_path, persist=True):
+        pixmap = QPixmap(image_path)
+        if pixmap.isNull():
+            QMessageBox.warning(self, "Invalid image", "The selected file could not be loaded as an image.")
+            return
+
+        self.qr_preview.setPixmap(
+            pixmap.scaled(
+                self.qr_preview.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
+        )
+        self.qr_path_label.setText(os.path.basename(image_path))
+        self.qr_path_label.setToolTip(image_path)
+        if persist:
+            self.qr_settings.setValue("mobile_app_qr_path", image_path)
+
+    @staticmethod
+    def _is_stream_url(value):
+        try:
+            parsed = urlsplit(value)
+            parsed.port  # Validate a provided port instead of accepting malformed URLs.
+            return parsed.scheme.lower() in {"http", "https", "rtsp", "rtsps"} and bool(parsed.hostname)
+        except ValueError:
+            return False
+
+    def validate_and_accept(self):
+        gesture_val = self.gesture_input.text().strip()
+        rover_val = self.rover_input.text().strip()
+
+        if gesture_val and not (gesture_val.isdigit() or self._is_stream_url(gesture_val)):
+            QMessageBox.warning(
+                self,
+                "Invalid gesture source",
+                "Enter a non-negative camera index or a valid http(s)/rtsp stream URL, or leave it blank.",
+            )
+            return
+
+        if rover_val and not self._is_stream_url(rover_val):
+            QMessageBox.warning(
+                self,
+                "Invalid rover stream URL",
+                "Enter a URL with a host, such as http://192.168.1.20:8080, or leave it blank.",
+            )
+            return
+        self.accept()
 
     def get_sources(self):
         gesture_val = self.gesture_input.text().strip()
-        if gesture_val.isdigit():
+        if not gesture_val:
+            gesture_source = None
+        elif gesture_val.isdigit():
             gesture_source = int(gesture_val)
         else:
             gesture_source = gesture_val
 
         rover_source = self.rover_input.text().strip()
+        if not rover_source:
+            rover_source = None
 
         return gesture_source, rover_source
 
@@ -145,17 +259,18 @@ class MADDashboard(QMainWindow):
         self.detector = HandDetector()
         self.controller = GestureController()
         self.sender = SerialSender()
-        self.is_serial_connected = self.sender.connect()
+        self.is_serial_connected = False
+        self.serial_connect_worker = None
 
         # Telemetry & Input Tracking
-        self.last_frame_time = time.time()
+        self.last_frame_time = time.monotonic()
         self.current_payload = 'S'
         self.pressed_keys = set()  # Tracks held WASD keys
         self.last_radar_update_time = None
 
         # Default Camera Sources
         self.GESTURE_CAM_INDEX = 0
-        self.ROVER_CAM_INDEX = "http://100.91.87.88:8080"
+        self.ROVER_CAM_INDEX = None
 
         # Prompt Modal Dialog for Sources
         self.prompt_source_control()
@@ -163,19 +278,32 @@ class MADDashboard(QMainWindow):
         # 2. Build User Interface Layout
         self.init_ui()
 
+        # Serial open/reboot wait runs in a worker; the dashboard remains responsive.
+        self.reconnect_serial()
+
         # Poll the existing serial connection without blocking the GUI thread.
         self.radar_timer = QTimer(self)
         self.radar_timer.timeout.connect(self.poll_radar_telemetry)
         self.radar_timer.start(50)
 
         # 3. Initialize Camera Threads
-        self.gesture_thread = CameraThread(source=self.GESTURE_CAM_INDEX, flip=True, detector=self.detector)
-        self.gesture_thread.frame_processed.connect(self.update_gesture_feed)
-        self.gesture_thread.start()
+        self.gesture_thread = None
+        if self.GESTURE_CAM_INDEX is not None:
+            self.gesture_thread = CameraThread(source=self.GESTURE_CAM_INDEX, flip=True, detector=self.detector)
+            self.gesture_thread.frame_processed.connect(self.update_gesture_feed)
+            self.gesture_thread.status_changed.connect(self.update_gesture_camera_status)
+            self.gesture_thread.start()
+        else:
+            self.gesture_status_label.setText('Not configured')
 
-        self.rover_thread = CameraThread(source=self.ROVER_CAM_INDEX, flip=True, detector=None)
-        self.rover_thread.frame_processed.connect(self.update_rover_feed)
-        self.rover_thread.start()
+        self.rover_thread = None
+        if self.ROVER_CAM_INDEX is not None:
+            self.rover_thread = CameraThread(source=self.ROVER_CAM_INDEX, flip=True, detector=None)
+            self.rover_thread.frame_processed.connect(self.update_rover_feed)
+            self.rover_thread.status_changed.connect(self.update_rover_camera_status)
+            self.rover_thread.start()
+        else:
+            self.rover_status_label.setText('Not configured')
 
     def prompt_source_control(self):
         dialog = SourceControlDialog(self)
@@ -190,6 +318,8 @@ class MADDashboard(QMainWindow):
 
         self.setStyleSheet("""
             QMainWindow { background-color: #0B0D12; }
+            QDockWidget { color: #00E5FF; font-weight: bold; }
+            QDockWidget::title { background-color: #1A2130; padding: 8px; border: 1px solid #2A2F3D; }
             QGroupBox { 
                 color: #00E5FF; font-family: 'Segoe UI', Arial, sans-serif;
                 font-size: 13px; font-weight: bold; letter-spacing: 1px;
@@ -228,6 +358,9 @@ class MADDashboard(QMainWindow):
         self.gesture_feed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.gesture_feed_label.setMinimumSize(480, 320)
         gesture_vbox.addWidget(self.gesture_feed_label)
+        self.gesture_status_label = QLabel('Waiting for source')
+        self.gesture_status_label.setStyleSheet('color: #FFCC00; font-size: 10px;')
+        gesture_vbox.addWidget(self.gesture_status_label)
         self.gesture_box.setLayout(gesture_vbox)
 
         self.rover_box = QGroupBox('ROVER CAMERA FEED')
@@ -236,6 +369,9 @@ class MADDashboard(QMainWindow):
         self.rover_feed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.rover_feed_label.setMinimumSize(480, 320)
         rover_vbox.addWidget(self.rover_feed_label)
+        self.rover_status_label = QLabel('Waiting for source')
+        self.rover_status_label.setStyleSheet('color: #FFCC00; font-size: 10px;')
+        rover_vbox.addWidget(self.rover_status_label)
         self.rover_box.setLayout(rover_vbox)
 
         cameras_hbox.addWidget(self.gesture_box, stretch=1)
@@ -253,13 +389,17 @@ class MADDashboard(QMainWindow):
         )
         self.port_label = QLabel(status_text)
         self.port_label.setTextFormat(Qt.TextFormat.RichText)
-        self.latency_label = QLabel("Frame Latency: <b style='color: #00E5FF;'>0 ms</b>")
+        self.latency_label = QLabel("Gesture Frame Interval: <b style='color: #00E5FF;'>-- ms</b>")
         self.latency_label.setTextFormat(Qt.TextFormat.RichText)
         self.reconnect_btn = QPushButton('🔄 RECONNECT SERIAL')
         self.reconnect_btn.clicked.connect(self.reconnect_serial)
+        self.toggle_log_btn = QPushButton('📜 OPEN LOG SIDEBAR ⮞')
+        self.toggle_log_btn.setMinimumHeight(36)
+        self.toggle_log_btn.clicked.connect(self.toggle_log_sidebar)
         link_vbox.addWidget(self.port_label)
         link_vbox.addWidget(self.latency_label)
         link_vbox.addWidget(self.reconnect_btn)
+        link_vbox.addWidget(self.toggle_log_btn)
         link_vbox.addStretch()
         self.link_box.setLayout(link_vbox)
 
@@ -367,27 +507,33 @@ class MADDashboard(QMainWindow):
         speed_vbox.addWidget(self.speed_status_label)
         self.speed_box.setLayout(speed_vbox)
 
-        self.log_box_group = QGroupBox('SYS LOGS')
+        self.log_box_group = QGroupBox('EVENT STREAM')
         log_vbox = QVBoxLayout()
-        self.toggle_log_btn = QPushButton('📜 TOGGLE LOGS ⮞')
-        self.toggle_log_btn.clicked.connect(self.toggle_logs)
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.append('[SYS] Project MANUS AD LUNAM Control Hub Active.')
-        log_vbox.addWidget(self.toggle_log_btn)
         log_vbox.addWidget(self.log_box)
         self.log_box_group.setLayout(log_vbox)
+
+        self.logs_dock = QDockWidget('SYS LOGS', self)
+        self.logs_dock.setObjectName('SystemLogsDock')
+        self.logs_dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
+        self.logs_dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        self.logs_dock.setMinimumWidth(280)
+        self.logs_dock.setWidget(self.log_box_group)
+        self.logs_dock.visibilityChanged.connect(self.update_log_sidebar_button)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.logs_dock)
+        self.logs_dock.hide()
 
         self.telemetry_hbox.addWidget(self.link_box, stretch=100)
         self.telemetry_hbox.addWidget(self.payload_box, stretch=100)
         self.telemetry_hbox.addWidget(self.radar_box, stretch=100)
         self.telemetry_hbox.addWidget(self.speed_box, stretch=100)
-        self.telemetry_hbox.addWidget(self.log_box_group, stretch=100)
 
-        self.log_box.setVisible(False)
-
-        main_vbox.addLayout(cameras_hbox, stretch=3)
-        main_vbox.addLayout(self.telemetry_hbox, stretch=1)
+        # Give the telemetry cards a little more vertical room; opening the dock
+        # reduces the central area and naturally pushes both rows left.
+        main_vbox.addLayout(cameras_hbox, stretch=5)
+        main_vbox.addLayout(self.telemetry_hbox, stretch=2)
 
     # --- KEYBOARD CONTROLS ---
     def keyPressEvent(self, event):
@@ -446,49 +592,35 @@ class MADDashboard(QMainWindow):
             self.payload_label.setText(command)
 
             if self.is_serial_connected:
-                self.sender.send_command(command, self.speed_pwm)
-                self.log_box.append(f"[TX] Command Sent: '{command}'")
+                if self.sender.send_command(command, self.speed_pwm):
+                    self.log_box.append(f"[TX] Command Sent: '{command}'")
+                else:
+                    self.mark_serial_disconnected('Command write failed')
             else:
                 self.log_box.append(f"[LOCAL] Command Evaluated: '{command}' (Serial Offline)")
 
-    def toggle_logs(self):
-        is_expanded = self.log_box.isVisible()
-        self.anim = QVariantAnimation(self)
-        self.anim.setDuration(300)
-        self.anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+    def toggle_log_sidebar(self):
+        """Show or hide the dock; QMainWindow resizes the dashboard beside it."""
+        self.logs_dock.setVisible(not self.logs_dock.isVisible())
 
-        if is_expanded:
-            self.toggle_log_btn.setText('📜 TOGGLE LOGS ⮞')
-            self.anim.setStartValue(250)
-            self.anim.setEndValue(100)
-            self.anim.finished.connect(lambda: self.log_box.setVisible(False))
-        else:
-            self.log_box.setVisible(True)
-            self.toggle_log_btn.setText('📜 HIDE LOGS ⮟')
-            self.anim.setStartValue(100)
-            self.anim.setEndValue(250)
-
-        self.anim.valueChanged.connect(self.update_bottom_row_stretches)
-        self.anim.start()
+    def update_log_sidebar_button(self, visible):
+        self.toggle_log_btn.setText(
+            '📜 CLOSE LOG SIDEBAR ◂' if visible else '📜 OPEN LOG SIDEBAR ⮞'
+        )
 
     def update_speed_display(self, value):
         """Update the display and resend the active command at the new PWM speed."""
         self.speed_pwm = round(value * 255 / 100)
         self.speed_value_label.setText(f'{value}%')
         if self.is_serial_connected:
-            self.sender.send_command(self.current_payload, self.speed_pwm)
-
-    def update_bottom_row_stretches(self, log_stretch_val):
-        log_stretch = int(log_stretch_val)
-        card_stretch = max(40, int((500 - log_stretch) / 4))
-        self.telemetry_hbox.setStretch(0, card_stretch)
-        self.telemetry_hbox.setStretch(1, card_stretch)
-        self.telemetry_hbox.setStretch(2, card_stretch)
-        self.telemetry_hbox.setStretch(3, card_stretch)
-        self.telemetry_hbox.setStretch(4, log_stretch)
+            if not self.sender.send_command(self.current_payload, self.speed_pwm):
+                self.mark_serial_disconnected('Speed update write failed')
 
     def poll_radar_telemetry(self):
         """Read tagged distance samples from the transmitter's USB serial stream."""
+        if not self.is_serial_connected:
+            return
+
         for angle, distance_cm in self.sender.read_radar_telemetry():
             self.last_radar_update_time = time.monotonic()
             self.radar_distance_label.setText(f'{distance_cm} cm')
@@ -506,6 +638,11 @@ class MADDashboard(QMainWindow):
                 f'color: {color}; font-size: 10px; font-weight: bold;'
             )
 
+        if self.is_serial_connected and (
+            self.sender.ser is None or not self.sender.ser.is_open
+        ):
+            self.mark_serial_disconnected('Telemetry read failed')
+
         if self.last_radar_update_time is None:
             if not self.is_serial_connected:
                 self.radar_status_label.setText('SERIAL LINK OFFLINE')
@@ -522,10 +659,12 @@ class MADDashboard(QMainWindow):
             )
 
     def update_gesture_feed(self, qt_image, raw_frame):
-        now = time.time()
-        latency_ms = int((now - self.last_frame_time) * 1000)
+        now = time.monotonic()
+        interval_ms = int((now - self.last_frame_time) * 1000)
         self.last_frame_time = now
-        self.latency_label.setText(f"Frame Latency: <b style='color: #00E5FF;'>{latency_ms} ms</b>")
+        self.latency_label.setText(
+            f"Gesture Frame Interval: <b style='color: #00E5FF;'>{interval_ms} ms</b>"
+        )
 
         label_size = self.gesture_feed_label.size()
         if label_size.width() > 0 and label_size.height() > 0:
@@ -556,22 +695,67 @@ class MADDashboard(QMainWindow):
                 )
             )
 
+    def update_gesture_camera_status(self, status):
+        self.gesture_status_label.setText(status)
+        color = '#00E676' if status == 'Online' else '#FFCC00'
+        if status in {'Stopped', 'Not configured'}:
+            color = '#8A9AB8'
+        self.gesture_status_label.setStyleSheet(f'color: {color}; font-size: 10px;')
+
+    def update_rover_camera_status(self, status):
+        self.rover_status_label.setText(status)
+        color = '#00E676' if status == 'Online' else '#FFCC00'
+        if status in {'Stopped', 'Not configured'}:
+            color = '#8A9AB8'
+        self.rover_status_label.setStyleSheet(f'color: {color}; font-size: 10px;')
+
     def reconnect_serial(self):
+        if self.serial_connect_worker is not None and self.serial_connect_worker.isRunning():
+            return
+
+        self.is_serial_connected = False
+        self.reconnect_btn.setEnabled(False)
+        self.port_label.setText(
+            "ESP32 Link: <span style='color: #FFCC00; font-weight: bold;'>CONNECTING...</span>"
+        )
         self.log_box.append('[SYS] Attempting ESP32 re-connection...')
-        self.is_serial_connected = self.sender.connect()
-        if self.is_serial_connected:
+        self.serial_connect_worker = SerialConnectWorker(self.sender, self)
+        self.serial_connect_worker.connection_finished.connect(self.on_serial_connect_finished)
+        self.serial_connect_worker.start()
+
+    def mark_serial_disconnected(self, reason):
+        self.is_serial_connected = False
+        self.port_label.setText(
+            "ESP32 Link: <span style='color: #FF1744; font-weight: bold;'>DISCONNECTED</span>"
+        )
+        self.radar_status_label.setText('SERIAL LINK OFFLINE')
+        self.radar_status_label.setStyleSheet(
+            'color: #FF1744; font-size: 10px; font-weight: bold;'
+        )
+        self.log_box.append(f'[SYS] Serial connection lost: {reason}.')
+
+    def on_serial_connect_finished(self, connected, detail):
+        self.is_serial_connected = connected
+        self.reconnect_btn.setEnabled(True)
+        if connected:
             self.port_label.setText(
-                f"ESP32 Link: <span style='color: #00E676; font-weight: bold;'>CONNECTED ({self.sender.port})</span>"
+                f"ESP32 Link: <span style='color: #00E676; font-weight: bold;'>CONNECTED ({detail})</span>"
             )
-            self.log_box.append(f'[SYS] Linked to ESP32 on port {self.sender.port}')
+            self.log_box.append(f'[SYS] Linked to ESP32 on port {detail}')
         else:
             self.port_label.setText(
                 "ESP32 Link: <span style='color: #FF1744; font-weight: bold;'>DISCONNECTED</span>"
             )
             self.log_box.append('[SYS] Search failed. No active ESP32 COM port.')
+            if detail:
+                self.log_box.append(f'[SYS] Connection detail: {detail}')
 
     def closeEvent(self, event):
-        self.gesture_thread.stop()
-        self.rover_thread.stop()
+        if self.serial_connect_worker is not None and self.serial_connect_worker.isRunning():
+            self.serial_connect_worker.wait(3000)
+        if self.gesture_thread is not None:
+            self.gesture_thread.stop()
+        if self.rover_thread is not None:
+            self.rover_thread.stop()
         self.sender.close()
         event.accept()

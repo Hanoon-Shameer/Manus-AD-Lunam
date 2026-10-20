@@ -12,22 +12,32 @@ class SerialSender:
         self._receive_buffer = bytearray()
 
     def find_esp32_port(self):
-        """Scans system ports to automatically discover the ESP32."""
+        """Find an unambiguous USB-serial target; never silently choose among devices."""
         ports = list(serial.tools.list_ports.comports())
         print("Scanning available COM ports...")
 
+        matches = []
         for p in ports:
             print(f"Found: {p.device} - {p.description}")
             # Look for common ESP32 USB-to-UART bridge drivers (CP210x, CH340, or generic USB Serial)
             desc = p.description.lower()
             if "cp210" in desc or "ch340" in desc or "usb serial" in desc or "ch341" in desc:
-                print(f"🚀 Match found! Target hardware detected on: {p.device}")
-                return p.device
+                matches.append(p.device)
 
-        # Fallback to the first available port if no exact driver name matches
-        if ports:
-            print(f"⚠️ No exact driver match, defaulting to first available: {ports[0].device}")
+        if len(matches) == 1:
+            print(f"🚀 Match found! Target hardware detected on: {matches[0]}")
+            return matches[0]
+        if len(matches) > 1:
+            print("⚠️ Multiple USB-serial devices found; disconnect extras before connecting.")
+            return None
+
+        # A lone unrecognized port is a reasonable fallback; multiple ports are ambiguous.
+        if len(ports) == 1:
+            print(f"⚠️ Using the only available serial device: {ports[0].device}")
             return ports[0].device
+        if len(ports) > 1:
+            print("⚠️ Multiple unknown serial devices found; refusing to choose one automatically.")
+            return None
 
         print("❌ No COM ports detected. Please plug in your ESP32.")
         return None
@@ -48,7 +58,8 @@ class SerialSender:
             self._receive_buffer.clear()
             # Give the ESP32 time to reboot and initialize ESP-NOW after the serial line opens.
             time.sleep(2)
-            self.send_command("S", 0)
+            if not self.send_command("S", 0):
+                return False
             print(f"✅ Successfully linked to ESP32 on {self.port}")
             return True
         except serial.SerialException as e:
@@ -61,9 +72,16 @@ class SerialSender:
         if self.ser and self.ser.is_open:
             speed_value = max(0, min(255, int(speed)))
             packet = f"{command_str}:{speed_value}\n".encode("utf-8")
-            self.ser.write(packet)
+            try:
+                self.ser.write(packet)
+                return True
+            except serial.SerialException as e:
+                print(f"Serial command write failed: {e}")
+                self.close()
+                return False
         else:
             print("⚠️ Warning: Serial line dropped or not open. Transmission skipped.")
+            return False
 
     def read_radar_telemetry(self):
         """Returns complete (angle_degrees, distance_cm) readings without blocking the UI."""
@@ -95,6 +113,7 @@ class SerialSender:
                     readings.append((angle, distance_cm))
         except serial.SerialException as e:
             print(f"Radar telemetry read failed: {e}")
+            self.close()
 
         return readings
 
