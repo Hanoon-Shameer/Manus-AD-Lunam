@@ -1,9 +1,0 @@
-.vscode/
-# Exclude local environment and tool folders
-.claude/
-.manus/
-.work/
-mcp-js-*
-
-# Exclude Windows system files
-desktop.ini
