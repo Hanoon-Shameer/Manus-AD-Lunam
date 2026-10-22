@@ -9,10 +9,10 @@ class CameraThread(QThread):
     frame_processed = pyqtSignal(QImage, object)
     status_changed = pyqtSignal(str)
 
-    def __init__(self, source=0, flip=False, detector=None):
+    def __init__(self, source=0, flip=0, detector=None):
         super().__init__()
         self.source = source
-        self.flip = flip  # Can be False, 0 (no flip), 1 (horizontal), -1 (180°)
+        self.flip = flip  # Can be 0 (no flip), 1 (horizontal), -1 (180°)
         self.detector = detector
         self._stop_event = threading.Event()
         self._capture = None

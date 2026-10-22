@@ -269,8 +269,10 @@ class MADDashboard(QMainWindow):
         self.last_radar_update_time = None
 
         # Camera Flip Controls
-        self.GESTURE_FLIP_MODE = 0  # 0 = no flip, 1 = horiz, -1 = 180°
-        self.ROVER_FLIP_MODE = 0   # 0 = no flip, 1 = horiz, -1 = 180°
+        self.gesture_flip_horz = False
+        self.gesture_flip_180 = True
+        self.rover_flip_horz = False
+        self.rover_flip_180 = True
 
         # Default Camera Sources
         self.GESTURE_CAM_INDEX = 0
@@ -363,10 +365,20 @@ class MADDashboard(QMainWindow):
         self.gesture_feed_label.setMinimumSize(700, 400)
         gesture_vbox.addWidget(self.gesture_feed_label)
 
-        self.gesture_flip_btn = QPushButton('🔄 FLIP 180°')
-        self.gesture_flip_btn.clicked.connect(self.flip_gesture_camera)
-        self.gesture_flip_btn.setStyleSheet('background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1A2638, stop:1 #0F1724); color: #00E5FF; border: 1px solid #00E5FF; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: bold;')
-        gesture_vbox.addWidget(self.gesture_flip_btn)
+        gesture_flip_hbox = QHBoxLayout()
+        gesture_flip_hbox.setSpacing(10)
+
+        self.gesture_flip_btn_180 = QPushButton('🔄 FLIP 180°')
+        self.gesture_flip_btn_180.clicked.connect(self.flip_gesture_180)
+        self.gesture_flip_btn_180.setStyleSheet('background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1A2638, stop:1 #0F1724); color: #00E5FF; border: 1px solid #00E5FF; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: bold;')
+        gesture_flip_hbox.addWidget(self.gesture_flip_btn_180)
+
+        self.gesture_flip_btn_horz = QPushButton('🔄 FLIP HORZ')
+        self.gesture_flip_btn_horz.clicked.connect(self.flip_gesture_horz)
+        self.gesture_flip_btn_horz.setStyleSheet('background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1A2638, stop:1 #0F1724); color: #00E5FF; border: 1px solid #00E5FF; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: bold;')
+        gesture_flip_hbox.addWidget(self.gesture_flip_btn_horz)
+
+        gesture_vbox.addLayout(gesture_flip_hbox)
         self.gesture_status_label = QLabel('Waiting for source')
         self.gesture_status_label.setStyleSheet('color: #FFCC00; font-size: 10px;')
         gesture_vbox.addWidget(self.gesture_status_label)
@@ -379,10 +391,20 @@ class MADDashboard(QMainWindow):
         self.rover_feed_label.setMinimumSize(700, 400)
         rover_vbox.addWidget(self.rover_feed_label)
 
-        self.rover_flip_btn = QPushButton('🔄 FLIP 180°')
-        self.rover_flip_btn.clicked.connect(self.flip_rover_camera)
-        self.rover_flip_btn.setStyleSheet('background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1A2638, stop:1 #0F1724); color: #00E5FF; border: 1px solid #00E5FF; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: bold;')
-        rover_vbox.addWidget(self.rover_flip_btn)
+        rover_flip_hbox = QHBoxLayout()
+        rover_flip_hbox.setSpacing(10)
+
+        self.rover_flip_btn_180 = QPushButton('🔄 FLIP 180°')
+        self.rover_flip_btn_180.clicked.connect(self.flip_rover_180)
+        self.rover_flip_btn_180.setStyleSheet('background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1A2638, stop:1 #0F1724); color: #00E5FF; border: 1px solid #00E5FF; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: bold;')
+        rover_flip_hbox.addWidget(self.rover_flip_btn_180)
+
+        self.rover_flip_btn_horz = QPushButton('🔄 FLIP HORZ')
+        self.rover_flip_btn_horz.clicked.connect(self.flip_rover_horz)
+        self.rover_flip_btn_horz.setStyleSheet('background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1A2638, stop:1 #0F1724); color: #00E5FF; border: 1px solid #00E5FF; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: bold;')
+        rover_flip_hbox.addWidget(self.rover_flip_btn_horz)
+
+        rover_vbox.addLayout(rover_flip_hbox)
         self.rover_status_label = QLabel('Waiting for source')
         self.rover_status_label.setStyleSheet('color: #FFCC00; font-size: 10px;')
         rover_vbox.addWidget(self.rover_status_label)
@@ -716,15 +738,30 @@ class MADDashboard(QMainWindow):
             color = '#8A9AB8'
         self.gesture_status_label.setStyleSheet(f'color: {color}; font-size: 10px;')
 
-    def flip_gesture_camera(self):
-        """Cycle through flip modes: No flip (0) → Horizontal flip (1) → 180° flip (-1) → No flip (0)"""
-        self.GESTURE_FLIP_MODE = (self.GESTURE_FLIP_MODE + 1) % 3
-        mode_names = ['NO FLIP', 'FLIP HORZ', 'FLIP 180°']
+    def flip_gesture_horz(self):
+        """Toggle horizontal flip for gesture camera"""
+        self.gesture_flip_horz = not self.gesture_flip_horz
 
         if self.gesture_thread and self.gesture_thread.isRunning():
-            self.gesture_thread.flip = self.GESTURE_FLIP_MODE
-            self.gesture_flip_btn.setText(f'🔄 {mode_names[self.GESTURE_FLIP_MODE]}')
-            log_msg = f'[CAM] Gesture camera set to {mode_names[self.GESTURE_FLIP_MODE]} flip'
+            flip_mode = 1 if self.gesture_flip_horz else 0
+            self.gesture_thread.flip = flip_mode
+            mode = "FLIP HORZ" if self.gesture_flip_horz else "NO FLIP"
+            self.gesture_flip_btn_horz.setText(f'🔄 {mode}')
+
+            log_msg = f'[CAM] Gesture camera set to {mode} flip'
+            self.log_box.append(log_msg)
+
+    def flip_gesture_180(self):
+        """Toggle 180° flip for gesture camera"""
+        self.gesture_flip_180 = not self.gesture_flip_180
+
+        if self.gesture_thread and self.gesture_thread.isRunning():
+            flip_mode = -1 if self.gesture_flip_180 else 0
+            self.gesture_thread.flip = flip_mode
+            mode = "FLIP 180°" if self.gesture_flip_180 else "NO FLIP"
+            self.gesture_flip_btn_180.setText(f'🔄 {mode}')
+
+            log_msg = f'[CAM] Gesture camera set to {mode} flip'
             self.log_box.append(log_msg)
 
     def update_rover_camera_status(self, status):
@@ -734,15 +771,30 @@ class MADDashboard(QMainWindow):
             color = '#8A9AB8'
         self.rover_status_label.setStyleSheet(f'color: {color}; font-size: 10px;')
 
-    def flip_rover_camera(self):
-        """Cycle through flip modes: No flip (0) → Horizontal flip (1) → 180° flip (-1) → No flip (0)"""
-        self.ROVER_FLIP_MODE = (self.ROVER_FLIP_MODE + 1) % 3
-        mode_names = ['NO FLIP', 'FLIP HORZ', 'FLIP 180°']
+    def flip_rover_horz(self):
+        """Toggle horizontal flip for rover camera"""
+        self.rover_flip_horz = not self.rover_flip_horz
 
         if self.rover_thread and self.rover_thread.isRunning():
-            self.rover_thread.flip = self.ROVER_FLIP_MODE
-            self.rover_flip_btn.setText(f'🔄 {mode_names[self.ROVER_FLIP_MODE]}')
-            log_msg = f'[CAM] Rover camera set to {mode_names[self.ROVER_FLIP_MODE]} flip'
+            flip_mode = 1 if self.rover_flip_horz else 0
+            self.rover_thread.flip = flip_mode
+            mode = "FLIP HORZ" if self.rover_flip_horz else "NO FLIP"
+            self.rover_flip_btn_horz.setText(f'🔄 {mode}')
+
+            log_msg = f'[CAM] Rover camera set to {mode} flip'
+            self.log_box.append(log_msg)
+
+    def flip_rover_180(self):
+        """Toggle 180° flip for rover camera"""
+        self.rover_flip_180 = not self.rover_flip_180
+
+        if self.rover_thread and self.rover_thread.isRunning():
+            flip_mode = -1 if self.rover_flip_180 else 0
+            self.rover_thread.flip = flip_mode
+            mode = "FLIP 180°" if self.rover_flip_180 else "NO FLIP"
+            self.rover_flip_btn_180.setText(f'🔄 {mode}')
+
+            log_msg = f'[CAM] Rover camera set to {mode} flip'
             self.log_box.append(log_msg)
 
     def reconnect_serial(self):
