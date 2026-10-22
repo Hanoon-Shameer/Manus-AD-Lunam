@@ -268,6 +268,10 @@ class MADDashboard(QMainWindow):
         self.pressed_keys = set()  # Tracks held WASD keys
         self.last_radar_update_time = None
 
+        # Camera Flip Controls
+        self.GESTURE_FLIP_MODE = 0  # 0 = no flip, 1 = horiz, -1 = 180°
+        self.ROVER_FLIP_MODE = 0   # 0 = no flip, 1 = horiz, -1 = 180°
+
         # Default Camera Sources
         self.GESTURE_CAM_INDEX = 0
         self.ROVER_CAM_INDEX = None
@@ -289,7 +293,7 @@ class MADDashboard(QMainWindow):
         # 3. Initialize Camera Threads
         self.gesture_thread = None
         if self.GESTURE_CAM_INDEX is not None:
-            self.gesture_thread = CameraThread(source=self.GESTURE_CAM_INDEX, flip=True, detector=self.detector)
+            self.gesture_thread = CameraThread(source=self.GESTURE_CAM_INDEX, flip=-1, detector=self.detector)
             self.gesture_thread.frame_processed.connect(self.update_gesture_feed)
             self.gesture_thread.status_changed.connect(self.update_gesture_camera_status)
             self.gesture_thread.start()
@@ -298,7 +302,7 @@ class MADDashboard(QMainWindow):
 
         self.rover_thread = None
         if self.ROVER_CAM_INDEX is not None:
-            self.rover_thread = CameraThread(source=self.ROVER_CAM_INDEX, flip=True, detector=None)
+            self.rover_thread = CameraThread(source=self.ROVER_CAM_INDEX, flip=-1, detector=None)
             self.rover_thread.frame_processed.connect(self.update_rover_feed)
             self.rover_thread.status_changed.connect(self.update_rover_camera_status)
             self.rover_thread.start()
@@ -358,6 +362,11 @@ class MADDashboard(QMainWindow):
         self.gesture_feed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.gesture_feed_label.setMinimumSize(700, 400)
         gesture_vbox.addWidget(self.gesture_feed_label)
+
+        self.gesture_flip_btn = QPushButton('🔄 FLIP 180°')
+        self.gesture_flip_btn.clicked.connect(self.flip_gesture_camera)
+        self.gesture_flip_btn.setStyleSheet('background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1A2638, stop:1 #0F1724); color: #00E5FF; border: 1px solid #00E5FF; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: bold;')
+        gesture_vbox.addWidget(self.gesture_flip_btn)
         self.gesture_status_label = QLabel('Waiting for source')
         self.gesture_status_label.setStyleSheet('color: #FFCC00; font-size: 10px;')
         gesture_vbox.addWidget(self.gesture_status_label)
@@ -369,6 +378,11 @@ class MADDashboard(QMainWindow):
         self.rover_feed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.rover_feed_label.setMinimumSize(700, 400)
         rover_vbox.addWidget(self.rover_feed_label)
+
+        self.rover_flip_btn = QPushButton('🔄 FLIP 180°')
+        self.rover_flip_btn.clicked.connect(self.flip_rover_camera)
+        self.rover_flip_btn.setStyleSheet('background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #1A2638, stop:1 #0F1724); color: #00E5FF; border: 1px solid #00E5FF; border-radius: 6px; padding: 6px 12px; font-size: 12px; font-weight: bold;')
+        rover_vbox.addWidget(self.rover_flip_btn)
         self.rover_status_label = QLabel('Waiting for source')
         self.rover_status_label.setStyleSheet('color: #FFCC00; font-size: 10px;')
         rover_vbox.addWidget(self.rover_status_label)
@@ -702,12 +716,34 @@ class MADDashboard(QMainWindow):
             color = '#8A9AB8'
         self.gesture_status_label.setStyleSheet(f'color: {color}; font-size: 10px;')
 
+    def flip_gesture_camera(self):
+        """Cycle through flip modes: No flip (0) → Horizontal flip (1) → 180° flip (-1) → No flip (0)"""
+        self.GESTURE_FLIP_MODE = (self.GESTURE_FLIP_MODE + 1) % 3
+        mode_names = ['NO FLIP', 'FLIP HORZ', 'FLIP 180°']
+
+        if self.gesture_thread and self.gesture_thread.isRunning():
+            self.gesture_thread.flip = self.GESTURE_FLIP_MODE
+            self.gesture_flip_btn.setText(f'🔄 {mode_names[self.GESTURE_FLIP_MODE]}')
+            log_msg = f'[CAM] Gesture camera set to {mode_names[self.GESTURE_FLIP_MODE]} flip'
+            self.log_box.append(log_msg)
+
     def update_rover_camera_status(self, status):
         self.rover_status_label.setText(status)
         color = '#00E676' if status == 'Online' else '#FFCC00'
         if status in {'Stopped', 'Not configured'}:
             color = '#8A9AB8'
         self.rover_status_label.setStyleSheet(f'color: {color}; font-size: 10px;')
+
+    def flip_rover_camera(self):
+        """Cycle through flip modes: No flip (0) → Horizontal flip (1) → 180° flip (-1) → No flip (0)"""
+        self.ROVER_FLIP_MODE = (self.ROVER_FLIP_MODE + 1) % 3
+        mode_names = ['NO FLIP', 'FLIP HORZ', 'FLIP 180°']
+
+        if self.rover_thread and self.rover_thread.isRunning():
+            self.rover_thread.flip = self.ROVER_FLIP_MODE
+            self.rover_flip_btn.setText(f'🔄 {mode_names[self.ROVER_FLIP_MODE]}')
+            log_msg = f'[CAM] Rover camera set to {mode_names[self.ROVER_FLIP_MODE]} flip'
+            self.log_box.append(log_msg)
 
     def reconnect_serial(self):
         if self.serial_connect_worker is not None and self.serial_connect_worker.isRunning():

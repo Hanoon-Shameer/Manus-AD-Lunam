@@ -12,7 +12,7 @@ class CameraThread(QThread):
     def __init__(self, source=0, flip=False, detector=None):
         super().__init__()
         self.source = source
-        self.flip = flip
+        self.flip = flip  # Can be False, 0 (no flip), 1 (horizontal), -1 (180°)
         self.detector = detector
         self._stop_event = threading.Event()
         self._capture = None
@@ -94,7 +94,7 @@ class CameraThread(QThread):
                     received_frame = True
 
                     if self.flip:
-                        frame = cv2.flip(frame, 1)
+                        frame = cv2.flip(frame, self.flip)
                     if self.detector is not None:
                         frame = self.detector.find_hands(frame)
 
