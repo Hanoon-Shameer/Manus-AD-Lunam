@@ -597,7 +597,7 @@ class MADDashboard(QMainWindow):
         self.speed_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.speed_sub.setStyleSheet('color: #6C7A9C; font-size: 10px;')
 
-        self.speed_value_label = QLabel('68%')
+        self.speed_value_label = QLabel('100%')
         self.speed_value_label.setFont(QFont('Segoe UI', 30, QFont.Weight.Bold))
         self.speed_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.speed_value_label.setStyleSheet(
