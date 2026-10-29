@@ -262,7 +262,7 @@ class UltrasonicRadarWidget(QWidget):
         self._sweep_angle = float(angle)
         self._readings.append((float(angle), float(distance_cm)))
         self._readings = self._readings[-45:]
-        self._status = 'NO ECHO / OUT OF RANGE' if distance_cm >= 400 else 'RADAR LIVE'
+        self._status = 'NO ECHO / OUT OF RANGE' if distance_cm > 35 else 'RADAR LIVE'
         self.update()
 
     def set_status(self, status):
@@ -318,14 +318,14 @@ class UltrasonicRadarWidget(QWidget):
 
         painter.setFont(QFont('Consolas', 8))
         painter.setPen(QColor('#4A9DB8'))
-        for fraction, label in ((0.33, '100'), (0.66, '200'), (1.0, '400 cm')):
+        for fraction, label in ((0.33, '12'), (0.66, '23'), (1.0, '35 cm')):
             ring_radius = radius * fraction
             painter.drawText(QPointF(center_x + ring_radius - 24, center_y - 4), label)
 
         for index, (reading_angle, distance_cm) in enumerate(self._readings):
-            if distance_cm >= 400:
+            if distance_cm > 35:
                 continue
-            distance_ratio = min(max(distance_cm, 0.0), 400.0) / 400.0
+            distance_ratio = min(max(distance_cm, 0.0), 35.0) / 35.0
             endpoint = self._endpoint(center_x, center_y, radius * distance_ratio, reading_angle)
             color = QColor('#FF3045' if distance_cm <= 20 else '#2D9FC7')
             color.setAlpha(min(190, 45 + index * 3))
@@ -345,7 +345,7 @@ class UltrasonicRadarWidget(QWidget):
         footer_top = panel.bottom() - footer_height + 2
         painter.setPen(QColor('#5CB9D4'))
         painter.setFont(QFont('Consolas', 8, QFont.Weight.Bold))
-        object_text = 'NO ECHO / OUT OF RANGE' if self._distance is None or self._distance >= 400 else 'OBJECT DETECTED'
+        object_text = 'NO ECHO / OUT OF RANGE' if self._distance is None or self._distance > 35 else 'OBJECT DETECTED'
         painter.drawText(QRectF(panel.left(), footer_top, panel.width(), 14), Qt.AlignmentFlag.AlignLeft, object_text)
 
         distance_text = '--' if self._distance is None else str(int(self._distance))
@@ -756,7 +756,7 @@ class MADDashboard(QMainWindow):
 
         for angle, distance_cm in self.sender.read_radar_telemetry():
             self.last_radar_update_time = time.monotonic()
-            if distance_cm >= 400:
+            if distance_cm > 35:
                 status = 'NO ECHO / OUT OF RANGE'
             else:
                 status = 'RADAR LIVE'
