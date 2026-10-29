@@ -617,8 +617,8 @@ class MADDashboard(QMainWindow):
 
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
         self.speed_slider.setRange(0, 100)
-        self.speed_slider.setValue(68)
-        self.speed_pwm = round(68 * 255 / 100)
+        self.speed_slider.setValue(100)
+        self.speed_pwm = round(100 * 255 / 100)
         self.speed_slider.setTickPosition(QSlider.TickPosition.NoTicks)
         self.speed_slider.setStyleSheet(
             'QSlider::groove:horizontal { background: #07090D; border: 1px solid #2A2F3D; height: 8px; border-radius: 4px; }'
