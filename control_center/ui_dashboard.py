@@ -1,10 +1,11 @@
+import math
 import os
 import sys
 import time
 from urllib.parse import urlsplit
 import cv2
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSettings
-from PyQt6.QtGui import QFont, QIcon, QPixmap, QImage
+from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer, QThread, pyqtSignal, QSettings
+from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QPainter, QPen, QPixmap, QImage
 from PyQt6.QtWidgets import (
     QDialog,
     QDockWidget,
@@ -242,6 +243,131 @@ class SourceControlDialog(QDialog):
         return gesture_source, rover_source
 
 
+class UltrasonicRadarWidget(QWidget):
+    """Compact semicircular radar display for the ultrasonic telemetry card."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumHeight(190)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._readings = []
+        self._angle = None
+        self._distance = None
+        self._status = 'WAITING FOR RADAR DATA'
+        self._sweep_angle = 90.0
+
+    def update_reading(self, angle, distance_cm):
+        self._angle = angle
+        self._distance = distance_cm
+        self._sweep_angle = float(angle)
+        self._readings.append((float(angle), float(distance_cm)))
+        self._readings = self._readings[-45:]
+        self._status = 'NO ECHO / OUT OF RANGE' if distance_cm > 35 else 'RADAR LIVE'
+        self.update()
+
+    def set_status(self, status):
+        self._status = status
+        self.update()
+
+    def reset_reading(self, status):
+        self._angle = None
+        self._distance = None
+        self._readings.clear()
+        self._status = status
+        self.update()
+
+    @staticmethod
+    def _endpoint(center_x, center_y, radius, angle):
+        radians = math.radians(angle)
+        return QPointF(
+            center_x + radius * math.cos(radians),
+            center_y - radius * math.sin(radians),
+        )
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), QColor('#0B0D12'))
+
+        panel = self.rect().adjusted(10, 8, -10, -8)
+        footer_height = 34
+        center_x = panel.center().x()
+        center_y = panel.bottom() - footer_height
+        radius = max(20.0, min(panel.width() / 2.0 - 6.0, panel.height() - footer_height - 8.0))
+
+        grid_pen = QPen(QColor('#245C73'), 1)
+        grid_pen.setCosmetic(True)
+        painter.setPen(grid_pen)
+        for fraction in (0.33, 0.66, 1.0):
+            ring_radius = radius * fraction
+            painter.drawArc(
+                QRectF(center_x - ring_radius, center_y - ring_radius, ring_radius * 2, ring_radius * 2),
+                0,
+                180 * 16,
+            )
+
+        spoke_pen = QPen(QColor('#1B4B60'), 1)
+        spoke_pen.setCosmetic(True)
+        painter.setPen(spoke_pen)
+        for spoke_angle in (0, 45, 90, 135, 180):
+            painter.drawLine(
+                QPointF(center_x, center_y),
+                self._endpoint(center_x, center_y, radius, spoke_angle),
+            )
+
+        painter.setFont(QFont('Consolas', 8))
+        painter.setPen(QColor('#4A9DB8'))
+        for fraction, label in ((0.33, '12'), (0.66, '23'), (1.0, '35 cm')):
+            ring_radius = radius * fraction
+            painter.drawText(QPointF(center_x + ring_radius - 24, center_y - 4), label)
+
+        for index, (reading_angle, distance_cm) in enumerate(self._readings):
+            if distance_cm > 35:
+                continue
+            distance_ratio = min(max(distance_cm, 0.0), 35.0) / 35.0
+            endpoint = self._endpoint(center_x, center_y, radius * distance_ratio, reading_angle)
+            color = QColor('#FF3045' if distance_cm <= 20 else '#2D9FC7')
+            color.setAlpha(min(190, 45 + index * 3))
+            painter.setPen(QPen(color, 2))
+            painter.drawLine(QPointF(center_x, center_y), endpoint)
+
+        sweep_endpoint = self._endpoint(center_x, center_y, radius, self._sweep_angle)
+        sweep_color = QColor('#78E8FF')
+        sweep_color.setAlpha(220)
+        painter.setPen(QPen(sweep_color, 2))
+        painter.drawLine(QPointF(center_x, center_y), sweep_endpoint)
+
+        painter.setPen(QPen(QColor('#00E5FF'), 3))
+        painter.setBrush(QBrush(QColor('#00E5FF')))
+        painter.drawEllipse(QPointF(center_x, center_y), 3, 3)
+
+        footer_top = panel.bottom() - footer_height + 2
+        painter.setPen(QColor('#5CB9D4'))
+        painter.setFont(QFont('Consolas', 8, QFont.Weight.Bold))
+        object_text = 'NO ECHO / OUT OF RANGE' if self._distance is None or self._distance > 35 else 'OBJECT DETECTED'
+        painter.drawText(QRectF(panel.left(), footer_top, panel.width(), 14), Qt.AlignmentFlag.AlignLeft, object_text)
+
+        distance_text = '--' if self._distance is None else str(int(self._distance))
+        angle_text = '--' if self._angle is None else str(int(self._angle))
+        painter.drawText(
+            QRectF(panel.left(), footer_top + 14, panel.width(), 14),
+            Qt.AlignmentFlag.AlignLeft,
+            f'ANGLE: {angle_text}°    DISTANCE: {distance_text} cm',
+        )
+
+        status_color = '#FFCC00' if 'OUT' in self._status or 'WAITING' in self._status else '#00E5FF'
+        if 'OFFLINE' in self._status or 'NO RADAR' in self._status:
+            status_color = '#FF3045'
+        painter.setPen(QColor(status_color))
+        painter.setFont(QFont('Segoe UI', 8, QFont.Weight.Bold))
+        painter.drawText(
+            QRectF(panel.left(), footer_top, panel.width(), 14),
+            Qt.AlignmentFlag.AlignRight,
+            self._status,
+        )
+
+
 class MADDashboard(QMainWindow):
 
     def __init__(self):
@@ -457,38 +583,9 @@ class MADDashboard(QMainWindow):
 
         self.radar_box = QGroupBox('ULTRASONIC RANGE')
         radar_vbox = QVBoxLayout()
-        radar_vbox.setSpacing(6)
-        radar_vbox.setContentsMargins(12, 16, 12, 10)
-
-        self.radar_distance_label = QLabel('-- cm')
-        self.radar_distance_label.setFont(QFont('Segoe UI', 30, QFont.Weight.Bold))
-        self.radar_distance_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.radar_distance_label.setStyleSheet(
-            'color: #00E5FF; background-color: #0B0D12; border: 1px solid #2A2F3D; border-radius: 10px;'
-        )
-
-        self.radar_angle_label = QLabel('SWEEP ANGLE: --°')
-        self.radar_angle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.radar_angle_label.setStyleSheet('color: #8A9AB8; font-size: 10px;')
-
-        self.radar_range_bar = QProgressBar()
-        self.radar_range_bar.setRange(0, 400)
-        self.radar_range_bar.setValue(0)
-        self.radar_range_bar.setTextVisible(False)
-        self.radar_range_bar.setFixedHeight(9)
-        self.radar_range_bar.setStyleSheet(
-            'QProgressBar { background: #07090D; border: 1px solid #2A2F3D; border-radius: 4px; }'
-            'QProgressBar::chunk { background: #00E5FF; border-radius: 3px; }'
-        )
-
-        self.radar_status_label = QLabel('WAITING FOR RADAR DATA')
-        self.radar_status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.radar_status_label.setStyleSheet('color: #FFCC00; font-size: 10px; font-weight: bold;')
-
-        radar_vbox.addWidget(self.radar_distance_label, stretch=2)
-        radar_vbox.addWidget(self.radar_angle_label)
-        radar_vbox.addWidget(self.radar_range_bar)
-        radar_vbox.addWidget(self.radar_status_label)
+        radar_vbox.setContentsMargins(8, 12, 8, 8)
+        self.radar_visual = UltrasonicRadarWidget()
+        radar_vbox.addWidget(self.radar_visual)
         self.radar_box.setLayout(radar_vbox)
 
         self.speed_box = QGroupBox('ROVER SPEED')
@@ -500,7 +597,7 @@ class MADDashboard(QMainWindow):
         self.speed_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.speed_sub.setStyleSheet('color: #6C7A9C; font-size: 10px;')
 
-        self.speed_value_label = QLabel('68%')
+        self.speed_value_label = QLabel('100%')
         self.speed_value_label.setFont(QFont('Segoe UI', 30, QFont.Weight.Bold))
         self.speed_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.speed_value_label.setStyleSheet(
@@ -520,8 +617,8 @@ class MADDashboard(QMainWindow):
 
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
         self.speed_slider.setRange(0, 100)
-        self.speed_slider.setValue(68)
-        self.speed_pwm = round(68 * 255 / 100)
+        self.speed_slider.setValue(100)
+        self.speed_pwm = round(100 * 255 / 100)
         self.speed_slider.setTickPosition(QSlider.TickPosition.NoTicks)
         self.speed_slider.setStyleSheet(
             'QSlider::groove:horizontal { background: #07090D; border: 1px solid #2A2F3D; height: 8px; border-radius: 4px; }'
@@ -659,20 +756,12 @@ class MADDashboard(QMainWindow):
 
         for angle, distance_cm in self.sender.read_radar_telemetry():
             self.last_radar_update_time = time.monotonic()
-            self.radar_distance_label.setText(f'{distance_cm} cm')
-            self.radar_angle_label.setText(f'SWEEP ANGLE: {angle}°')
-            self.radar_range_bar.setValue(distance_cm)
-
-            if distance_cm >= 400:
+            if distance_cm > 35:
                 status = 'NO ECHO / OUT OF RANGE'
-                color = '#FFCC00'
             else:
                 status = 'RADAR LIVE'
-                color = '#00E676'
-            self.radar_status_label.setText(status)
-            self.radar_status_label.setStyleSheet(
-                f'color: {color}; font-size: 10px; font-weight: bold;'
-            )
+            self.radar_visual.update_reading(angle, distance_cm)
+            self.radar_visual.set_status(status)
 
         if self.is_serial_connected and (
             self.sender.ser is None or not self.sender.ser.is_open
@@ -681,18 +770,12 @@ class MADDashboard(QMainWindow):
 
         if self.last_radar_update_time is None:
             if not self.is_serial_connected:
-                self.radar_status_label.setText('SERIAL LINK OFFLINE')
+                self.radar_visual.set_status('SERIAL LINK OFFLINE')
             return
 
         if time.monotonic() - self.last_radar_update_time > 1.5:
             self.last_radar_update_time = None
-            self.radar_distance_label.setText('-- cm')
-            self.radar_angle_label.setText('SWEEP ANGLE: --°')
-            self.radar_range_bar.setValue(0)
-            self.radar_status_label.setText('NO RADAR DATA')
-            self.radar_status_label.setStyleSheet(
-                'color: #FF1744; font-size: 10px; font-weight: bold;'
-            )
+            self.radar_visual.reset_reading('NO RADAR DATA')
 
     def update_gesture_feed(self, qt_image, raw_frame):
         now = time.monotonic()
@@ -816,10 +899,7 @@ class MADDashboard(QMainWindow):
         self.port_label.setText(
             "ESP32 Link: <span style='color: #FF1744; font-weight: bold;'>DISCONNECTED</span>"
         )
-        self.radar_status_label.setText('SERIAL LINK OFFLINE')
-        self.radar_status_label.setStyleSheet(
-            'color: #FF1744; font-size: 10px; font-weight: bold;'
-        )
+        self.radar_visual.set_status('SERIAL LINK OFFLINE')
         self.log_box.append(f'[SYS] Serial connection lost: {reason}.')
 
     def on_serial_connect_finished(self, connected, detail):
@@ -830,6 +910,8 @@ class MADDashboard(QMainWindow):
                 f"ESP32 Link: <span style='color: #00E676; font-weight: bold;'>CONNECTED ({detail})</span>"
             )
             self.log_box.append(f'[SYS] Linked to ESP32 on port {detail}')
+            if not self.sender.send_command(self.current_payload, self.speed_pwm):
+                self.mark_serial_disconnected('Telemetry handshake failed')
         else:
             self.port_label.setText(
                 "ESP32 Link: <span style='color: #FF1744; font-weight: bold;'>DISCONNECTED</span>"
