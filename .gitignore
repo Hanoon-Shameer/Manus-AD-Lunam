@@ -3,6 +3,7 @@
 .claude/
 .manus/
 .work/
+outputs/
 mcp-js-*
 
 # Exclude Windows system files
