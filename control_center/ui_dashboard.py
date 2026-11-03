@@ -1,9 +1,15 @@
 """Control Center UI for Project MANUS AD LUNAM.
 
-Single window, two pages over a shared Earthrise backdrop:
-  * Mission Connect -- source configuration and mobile-app pairing.
-  * Command Center  -- the flight deck: rover and laptop camera side by side,
-    radar, drive command, speed and link status beneath.
+Single window, two pages over a shared lunar backdrop:
+  * Mission Connect -- a compact card for stream sources and mobile-app pairing.
+  * Command Center  -- the flight deck. The hero feed (rover by default) with
+    drive command, speed and system link beneath it; the swappable laptop
+    camera, radar and live telemetry in the right rail.
+
+Sadiq's layout and glass design, with Hanoon's pieces merged in: the MANUS /
+AD LUNAM brand mark, the plexus backdrop, live telemetry graphs, the system
+link status list, keyboard key caps, fullscreen view, flip-mode fix and card
+glow.
 
 All hardware behaviour (serial, camera threads, gesture dispatch, radar polling)
 is unchanged; this module only owns presentation. Visual tokens and the shared
@@ -61,13 +67,16 @@ from serial_sender import SerialSender
 from stream_manager import CameraThread
 
 from ui_theme import (
+    ACCENT,
     ACCENT_LIGHT,
     APP_STYLESHEET,
     BAD,
+    CMD_STOP,
     INK,
-    OK,
     PAD_FEED,
     WARN,
+    BrandMark,
+    CommandLabel,
     DirectionIndicator,
     EventLogView,
     GlassCapsule,
@@ -78,9 +87,12 @@ from ui_theme import (
     SpeedSlider,
     StarfieldBackground,
     StatusPill,
+    StatusRow,
+    TelemetryGraph,
     VideoSurface,
     app_font,
     caption_label,
+    command_color,
     css,
     micro_font,
     numeral_font,
@@ -89,8 +101,9 @@ from ui_theme import (
 )
 
 RADAR_RANGE_CM = 35.0        # outer ring of the ultrasonic sweep
-RADAR_DANGER_CM = 20.0       # inside this, echoes turn red
+RADAR_DANGER_CM = 20.0       # inside this, echoes turn red and the radar card alerts
 PAGE_FADE_MS = 300
+KEYBOARD_MODE_HOLD_MS = 1500  # stay in keyboard mode briefly after the last key is released
 
 
 class SerialConnectWorker(QThread):
@@ -113,14 +126,16 @@ class SerialConnectWorker(QThread):
 
 
 class MissionConnectPage(QWidget):
-    """Page 1: stream sources and mobile-app pairing.
+    """Page 1: stream sources and mobile-app pairing, in one compact card.
 
     Holds the authoritative source-validation logic. Field errors appear as
     inline captions rather than modal dialogs; the accepted values are exactly
-    those the old SourceControlDialog accepted.
+    those the original SourceControlDialog accepted.
     """
 
     connect_requested = pyqtSignal()
+    CARD_WIDTH = 480
+    QR_TILE = 104
 
     def __init__(self, parent=None, icon_path=None):
         super().__init__(parent)
@@ -128,17 +143,15 @@ class MissionConnectPage(QWidget):
         self.qr_settings = QSettings("Manus", "ManusADLunam")
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(40, 32, 40, 32)
+        outer.setContentsMargins(40, 28, 40, 28)
         outer.addStretch(1)
 
         column = QVBoxLayout()
-        column.setSpacing(26)
+        column.setSpacing(20)
         column.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-
         column.addLayout(self._build_header(icon_path))
         self.card = self._build_card()
-        self.card.setMaximumWidth(920)
-        self.card.setMinimumWidth(720)
+        self.card.setFixedWidth(self.CARD_WIDTH)
         column.addWidget(self.card, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         outer.addLayout(column)
@@ -151,14 +164,14 @@ class MissionConnectPage(QWidget):
     # -- construction -------------------------------------------------------
     def _build_header(self, icon_path):
         header = QVBoxLayout()
-        header.setSpacing(10)
+        header.setSpacing(6)
         header.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
         if icon_path and os.path.exists(icon_path):
             mark = QLabel()
             mark.setPixmap(
                 QPixmap(icon_path).scaled(
-                    52, 52,
+                    40, 40,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
@@ -168,124 +181,104 @@ class MissionConnectPage(QWidget):
 
         title = QLabel('Manus Ad Lunam')
         title.setObjectName('appTitle')
-        title.setFont(app_font(38, QFont.Weight.Bold, spacing=0.2))
+        title.setFont(app_font(30, QFont.Weight.Bold, spacing=0.2))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header.addWidget(title)
 
-        subtitle = QLabel('Lunar Rover Command & Control')
+        subtitle = QLabel('Source Control')
         subtitle.setObjectName('appSubtitle')
-        subtitle.setFont(app_font(16, QFont.Weight.Normal))
+        subtitle.setFont(app_font(15, QFont.Weight.Normal))
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         header.addWidget(subtitle)
         return header
 
     def _build_card(self):
-        card = GlassCard(parent=self, radius=34, padding=30, spacing=24)
+        card = GlassCard(parent=self, radius=30, padding=26, spacing=8)
 
-        columns = QHBoxLayout()
-        columns.setSpacing(34)
-        columns.addLayout(self._build_source_column(), 3)
-        columns.addWidget(self._build_divider())
-        columns.addLayout(self._build_pairing_column(), 2)
-        card.body.addLayout(columns)
-
-        self.submit_btn = PillButton('Connect Streams', variant='primary',
-                                     glyph='arrow-right', height=52)
-        self.submit_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.submit_btn.clicked.connect(self.validate_and_accept)
-        card.body.addWidget(self.submit_btn)
-        return card
-
-    def _build_divider(self):
-        divider = QWidget()
-        divider.setFixedWidth(1)
-        divider.setStyleSheet(f'background-color: {css(INK, 0.09)};')
-        return divider
-
-    def _build_source_column(self):
-        column = QVBoxLayout()
-        column.setSpacing(8)
-
-        column.addWidget(caption_label('Laptop Camera'))
+        card.body.addWidget(caption_label('Laptop Camera'))
         self.gesture_input = QLineEdit('0')
         self.gesture_input.setPlaceholderText('0')
         self.gesture_input.returnPressed.connect(self.validate_and_accept)
         self.gesture_input.textChanged.connect(
             lambda: self._clear_error(self.gesture_input, self.gesture_error)
         )
-        column.addWidget(self.gesture_input)
-
-        gesture_help = QLabel('Drives gesture control. Camera index (0, 1, …) or a stream URL.')
+        card.body.addWidget(self.gesture_input)
+        gesture_help = QLabel('Gesture control. Camera index (0, 1, …) or a stream URL.')
         gesture_help.setObjectName('helper')
-        gesture_help.setWordWrap(True)
-        column.addWidget(gesture_help)
+        card.body.addWidget(gesture_help)
+        self.gesture_error = self._error_label()
+        card.body.addWidget(self.gesture_error)
 
-        self.gesture_error = QLabel('')
-        self.gesture_error.setObjectName('error')
-        self.gesture_error.setWordWrap(True)
-        self.gesture_error.hide()
-        column.addWidget(self.gesture_error)
-
-        column.addSpacing(14)
-
-        column.addWidget(caption_label('Rover Stream'))
+        card.body.addSpacing(6)
+        card.body.addWidget(caption_label('Rover Stream'))
         self.rover_input = QLineEdit()
         self.rover_input.setPlaceholderText('http://192.168.1.20:8080')
         self.rover_input.returnPressed.connect(self.validate_and_accept)
         self.rover_input.textChanged.connect(
             lambda: self._clear_error(self.rover_input, self.rover_error)
         )
-        column.addWidget(self.rover_input)
-
+        card.body.addWidget(self.rover_input)
         rover_help = QLabel('http(s) or RTSP URL with a host. Leave blank to skip.')
         rover_help.setObjectName('helper')
-        rover_help.setWordWrap(True)
-        column.addWidget(rover_help)
+        card.body.addWidget(rover_help)
+        self.rover_error = self._error_label()
+        card.body.addWidget(self.rover_error)
 
-        self.rover_error = QLabel('')
-        self.rover_error.setObjectName('error')
-        self.rover_error.setWordWrap(True)
-        self.rover_error.hide()
-        column.addWidget(self.rover_error)
+        card.body.addSpacing(8)
+        card.body.addWidget(self._hairline())
+        card.body.addSpacing(8)
+        card.body.addLayout(self._build_pairing_row())
+        card.body.addSpacing(10)
 
-        column.addStretch(1)
-        return column
+        self.submit_btn = PillButton('Connect Streams', variant='primary',
+                                     glyph='arrow-right', height=48)
+        self.submit_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.submit_btn.clicked.connect(self.validate_and_accept)
+        card.body.addWidget(self.submit_btn)
+        return card
 
-    def _build_pairing_column(self):
-        column = QVBoxLayout()
-        column.setSpacing(10)
+    @staticmethod
+    def _error_label():
+        label = QLabel('')
+        label.setObjectName('error')
+        label.setWordWrap(True)
+        label.hide()
+        return label
 
-        heading = caption_label('Mobile App Pairing')
-        heading.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        column.addWidget(heading)
+    @staticmethod
+    def _hairline():
+        line = QWidget()
+        line.setFixedHeight(1)
+        line.setStyleSheet(f'background-color: {css(INK, 0.10)};')
+        return line
 
-        self.qr_preview = QLabel('No static QR image loaded')
+    def _build_pairing_row(self):
+        """QR thumbnail beside its caption, file name and picker."""
+        row = QHBoxLayout()
+        row.setSpacing(16)
+
+        self.qr_preview = QLabel('No QR\nimage')
         self.qr_preview.setObjectName('qrTile')
         self.qr_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.qr_preview.setWordWrap(True)
-        self.qr_preview.setFixedSize(200, 200)
-        column.addWidget(self.qr_preview, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self.qr_preview.setFixedSize(self.QR_TILE, self.QR_TILE)
+        row.addWidget(self.qr_preview, 0, Qt.AlignmentFlag.AlignTop)
 
-        # One elided line (it is a filename); wrapping here mis-measured and
-        # slid under the tile.
+        details = QVBoxLayout()
+        details.setSpacing(6)
+        details.addWidget(caption_label('Mobile App Pairing'))
+        # One elided line (it is a file name).
         self.qr_path_label = QLabel('No image selected')
         self.qr_path_label.setObjectName('helper')
-        self.qr_path_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        column.addWidget(self.qr_path_label)
-
-        self.load_qr_btn = PillButton('Choose Image…', variant='secondary', glyph='image')
+        details.addWidget(self.qr_path_label)
+        self.load_qr_btn = PillButton('Choose Image…', glyph='image', compact=True)
+        details.addWidget(self.load_qr_btn, 0, Qt.AlignmentFlag.AlignLeft)
         self.load_qr_btn.clicked.connect(self.choose_qr_image)
-        column.addWidget(self.load_qr_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-        # Explicit break instead of word-wrap: wrapped labels in this column
-        # were measured one line short and overlapped their neighbours.
         note = QLabel('Displays the image only; it does not\ngenerate or verify the QR contents.')
         note.setObjectName('helper')
-        note.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        column.addWidget(note)
-
-        column.addStretch(1)
-        return column
+        details.addWidget(note)
+        details.addStretch(1)
+        row.addLayout(details, 1)
+        return row
 
     # -- QR picker ----------------------------------------------------------
     def choose_qr_image(self):
@@ -307,7 +300,7 @@ class MissionConnectPage(QWidget):
             return
 
         # Inset the code so the white tile keeps its rounded corners visible.
-        inset = self.qr_preview.size() - QSize(24, 24)
+        inset = self.qr_preview.size() - QSize(14, 14)
         self.qr_preview.setPixmap(
             pixmap.scaled(
                 inset,
@@ -317,7 +310,7 @@ class MissionConnectPage(QWidget):
         )
         self.qr_path_label.setText(
             self.qr_path_label.fontMetrics().elidedText(
-                os.path.basename(image_path), Qt.TextElideMode.ElideMiddle, 240
+                os.path.basename(image_path), Qt.TextElideMode.ElideMiddle, 250
             )
         )
         self.qr_path_label.setToolTip(image_path)
@@ -397,8 +390,8 @@ class MissionConnectPage(QWidget):
 class SourceControlDialog(QDialog):
     """Modal wrapper around MissionConnectPage.
 
-    The dashboard now hosts the source form as its first page, but this dialog
-    is kept so the original entry point (and its validation API) still works for
+    The dashboard hosts the source form as its first page, but this dialog is
+    kept so the original entry point (and its validation API) still works for
     anything that reaches for it.
     """
 
@@ -408,7 +401,6 @@ class SourceControlDialog(QDialog):
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setStyleSheet(APP_STYLESHEET)
         self.setFont(app_font(14))
-        self.setMinimumWidth(860)
 
         self.page = MissionConnectPage(self)
         self.page.connect_requested.connect(self.accept)
@@ -443,7 +435,8 @@ class UltrasonicRadarWidget(QWidget):
 
     Each echo is stamped when it arrives and decays over TRAIL_SECONDS, like the
     afterglow on a real sweep display, so the trail fades on its own even when
-    no new samples come in. The sweep fan glows only on its trailing side.
+    no new samples come in. The sweep fan glows only on its trailing side. On a
+    short card the readout switches to a compact one-line footer.
 
     Public API is unchanged: update_reading / set_status / reset_reading, a
     35 cm range and rings at 12 / 23 / 35 cm.
@@ -451,12 +444,14 @@ class UltrasonicRadarWidget(QWidget):
 
     FAN_DEGREES = 34.0
     FOOTER_HEIGHT = 80
+    FOOTER_COMPACT = 48
+    COMPACT_BELOW = 230     # widget height at which the footer compacts
     TRAIL_SECONDS = 2.6     # echo afterglow
     DECAY_FRAME_MS = 40     # repaint cadence while echoes are fading
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumHeight(212)
+        self.setMinimumHeight(130)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._readings = []           # (angle, distance_cm, monotonic stamp)
         self._angle = None
@@ -486,8 +481,9 @@ class UltrasonicRadarWidget(QWidget):
         self.update()
 
     def set_status(self, status):
-        self._status = status
-        self.update()
+        if status != self._status:
+            self._status = status
+            self.update()
 
     def reset_reading(self, status):
         self._angle = None
@@ -527,23 +523,22 @@ class UltrasonicRadarWidget(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         bounds = QRectF(self.rect()).adjusted(4, 2, -4, -2)
-        radius = max(
-            24.0,
-            min(bounds.width() / 2.0 - 8.0, bounds.height() - self.FOOTER_HEIGHT - 18.0),
-        )
+        compact = bounds.height() < self.COMPACT_BELOW
+        footer = self.FOOTER_COMPACT if compact else self.FOOTER_HEIGHT
+        radius = max(24.0, min(bounds.width() / 2.0 - 8.0, bounds.height() - footer - 18.0))
         # Centre the scope + readout block vertically, so a tall card does not
         # leave all its spare room above the arc.
-        block = radius + 18.0 + self.FOOTER_HEIGHT
+        block = radius + 18.0 + footer
         top = bounds.top() + max(0.0, (bounds.height() - block) / 2.0)
         panel = QRectF(bounds.left(), top, bounds.width(), block)
-        center = QPointF(panel.center().x(), panel.bottom() - self.FOOTER_HEIGHT)
+        center = QPointF(panel.center().x(), panel.bottom() - footer)
 
         self._paint_scope(painter, center, radius)
         self._paint_rings(painter, center, radius)
         self._paint_fan(painter, center, radius)
         self._paint_echoes(painter, center, radius)
         self._paint_hub(painter, center)
-        self._paint_readout(painter, panel)
+        self._paint_readout(painter, panel, footer, compact)
 
     def _paint_scope(self, painter, center, radius):
         """Dark backing for the arc, so the backdrop never competes with data."""
@@ -660,27 +655,30 @@ class UltrasonicRadarWidget(QWidget):
         painter.setBrush(QBrush(tint(ACCENT_LIGHT, 0.95)))
         painter.drawEllipse(center, 2.6, 2.6)
 
-    def _paint_readout(self, painter, panel):
+    def _paint_readout(self, painter, panel, footer, compact):
         """Thin oversized numerals over tiny upper-case captions."""
-        top = panel.bottom() - self.FOOTER_HEIGHT + 10
+        top = panel.bottom() - footer + (6 if compact else 10)
         in_range = self._distance is not None and self._distance <= RADAR_RANGE_CM
         token = BAD if (in_range and self._distance <= RADAR_DANGER_CM) else ACCENT_LIGHT
         left, right = panel.left() + 2, panel.right() - 2
 
-        painter.setFont(micro_font())
-        painter.setPen(QPen(tint(INK, 0.46)))
-        caption_base = top + 9
-        painter.drawText(QPointF(left, caption_base), 'DISTANCE')
-        bearing_caption = 'BEARING'
-        painter.drawText(
-            QPointF(right - painter.fontMetrics().horizontalAdvance(bearing_caption), caption_base),
-            bearing_caption,
-        )
+        if compact:
+            number_base = top + 24
+            big, bearing_size = 28, 20
+        else:
+            painter.setFont(micro_font())
+            painter.setPen(QPen(tint(INK, 0.46)))
+            caption_base = top + 9
+            painter.drawText(QPointF(left, caption_base), 'DISTANCE')
+            painter.drawText(
+                QPointF(right - painter.fontMetrics().horizontalAdvance('BEARING'), caption_base),
+                'BEARING',
+            )
+            number_base = caption_base + 44
+            big, bearing_size = 46, 30
 
-        number_base = caption_base + 44
         distance_text = '--' if not in_range else str(int(self._distance))
-        big = numeral_font(46)
-        painter.setFont(big)
+        painter.setFont(numeral_font(big))
         painter.setPen(QPen(tint(INK, 0.97) if in_range else tint(INK, 0.36)))
         painter.drawText(QPointF(left - 2, number_base), distance_text)
         unit_x = left + painter.fontMetrics().horizontalAdvance(distance_text) + 3
@@ -689,7 +687,7 @@ class UltrasonicRadarWidget(QWidget):
         painter.drawText(QPointF(unit_x, number_base), 'CM')
 
         angle_text = '--' if self._angle is None else f'{int(self._angle)}°'
-        painter.setFont(numeral_font(30))
+        painter.setFont(numeral_font(bearing_size))
         painter.setPen(QPen(tint(INK, 0.92) if self._angle is not None else tint(INK, 0.36)))
         painter.drawText(
             QPointF(right - painter.fontMetrics().horizontalAdvance(angle_text), number_base),
@@ -713,17 +711,26 @@ class UltrasonicRadarWidget(QWidget):
 
 class MADDashboard(QMainWindow):
 
+    DEFAULT_SIZE = (1360, 820)
+    MIN_SIZE = (1100, 680)
+    # The right rail scales with the window but stays a supporting column.
+    RAIL_MIN = 300
+    RAIL_MAX = 400
+    RAIL_SHARE = 0.26
+    FEED_HEADER = 32  # height of a feed panel's title row
+    TOP_BAR_COMPACT_BELOW = 1080  # header width under which it drops to icons
+    TOP_BAR_TAGLINE_FROM = 1320   # header width from which the tagline shows
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle('Project MANUS AD LUNAM - Command & Control Center')
-        self.setMinimumSize(1100, 680)
-        self.resize(1360, 820)
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
         self.icon_path = os.path.join(script_dir, 'icon.png')
 
         if os.path.exists(self.icon_path):
             self.setWindowIcon(QIcon(self.icon_path))
+        self._place_window()
 
         # 1. Core Modules
         self.detector = HandDetector()
@@ -734,9 +741,21 @@ class MADDashboard(QMainWindow):
 
         # Telemetry & Input Tracking
         self.last_frame_time = time.monotonic()
+        self._interval_ms = None       # smoothed gesture frame interval ("ping")
+        self._ping_ui_time = 0.0       # throttles the header readout
         self.current_payload = 'S'
         self.pressed_keys = set()  # Tracks held WASD keys
         self.last_radar_update_time = None
+        self._radar_alert_until = 0.0
+
+        # Live state behind the System Link card
+        self._camera_status = {'gesture': 'Waiting for source', 'rover': 'Waiting for source'}
+        self._link_state = 'disconnected'
+        self._link_detail = ''
+        self._control_mode = 'gesture'
+        self._mode_timer = QTimer(self)
+        self._mode_timer.setSingleShot(True)
+        self._mode_timer.timeout.connect(self._end_keyboard_mode)
 
         # Camera Flip Controls
         self.gesture_flip_horz = False
@@ -752,6 +771,10 @@ class MADDashboard(QMainWindow):
         self.gesture_thread = None
         self.rover_thread = None
         self._page_anim = None
+        self._hero = 'rover'
+        self._rover_focus = False      # fullscreen hero view
+        self._was_maximized = False
+        self._log_was_open = False
 
         # Poll the serial connection without blocking the GUI thread.
         self.radar_timer = QTimer(self)
@@ -759,6 +782,26 @@ class MADDashboard(QMainWindow):
 
         # 2. Build User Interface Layout
         self.init_ui()
+
+    def _place_window(self):
+        """Default size, clamped to the screen and centred (as in Hanoon's)."""
+        width, height = self.DEFAULT_SIZE
+        min_width, min_height = self.MIN_SIZE
+        screen = self.screen()
+        if screen is None:
+            self.setMinimumSize(min_width, min_height)
+            self.resize(width, height)
+            return
+        avail = screen.availableGeometry()
+        width = min(width, avail.width() - 40)
+        height = min(height, avail.height() - 40)
+        self.setMinimumSize(min(min_width, avail.width() - 40), min(min_height, avail.height() - 40))
+        self.setGeometry(
+            avail.x() + (avail.width() - width) // 2,
+            avail.y() + (avail.height() - height) // 2,
+            width,
+            height,
+        )
 
     # ------------------------------------------------------------------ UI --
     def init_ui(self):
@@ -784,12 +827,6 @@ class MADDashboard(QMainWindow):
         self.stack.setCurrentWidget(self.connect_page)
         self._lock_command_focus()
 
-    # The right rail scales with the window but stays a supporting column.
-    RAIL_MIN = 320
-    RAIL_MAX = 400
-    RAIL_SHARE = 0.26
-    FEED_HEADER = 32  # height of a feed panel's title row
-
     def _build_command_page(self):
         page = QWidget()
         page.setObjectName('page')
@@ -809,20 +846,23 @@ class MADDashboard(QMainWindow):
         hero_column.setSpacing(16)
         self.hero_card = GlassCard(padding=PAD_FEED, spacing=0)
         hero_column.addWidget(self.hero_card, 1)
-        hero_column.addWidget(self._build_control_strip())
+        self.control_strip = self._build_control_strip()
+        hero_column.addWidget(self.control_strip)
         deck.addLayout(hero_column, 1)
 
-        # Right rail: the inset feed, then the radar.
+        # Right rail: the inset feed, the radar, then live telemetry.
         self.rail = QWidget()
         rail_layout = QVBoxLayout(self.rail)
         rail_layout.setContentsMargins(0, 0, 0, 0)
         rail_layout.setSpacing(16)
         self.inset_card = GlassCard(padding=PAD_FEED, spacing=0)
         rail_layout.addWidget(self.inset_card)
-        radar_card = GlassCard('Ultrasonic Radar', spacing=6)
+        self.radar_box = GlassCard('Ultrasonic Radar', spacing=6)
         self.radar_visual = UltrasonicRadarWidget()
-        radar_card.body.addWidget(self.radar_visual, 1)
-        rail_layout.addWidget(radar_card, 1)
+        self.radar_box.body.addWidget(self.radar_visual, 1)
+        # Radar and telemetry share the spare height, so the graphs stay legible.
+        rail_layout.addWidget(self.radar_box, 3)
+        rail_layout.addWidget(self._build_telemetry_card(), 2)
         deck.addWidget(self.rail)
         outer.addLayout(deck, 1)
 
@@ -830,8 +870,8 @@ class MADDashboard(QMainWindow):
         self.gesture_panel = self._build_laptop_feed()
         self.hero_card.body.addWidget(self.rover_panel)
         self.inset_card.body.addWidget(self.gesture_panel)
-        self._hero = 'rover'
         self._sync_feed_roles()
+        self._refresh_mode_row()
         self._fit_rail(self.width())
         return page
 
@@ -848,21 +888,9 @@ class MADDashboard(QMainWindow):
 
         brand = GlassCapsule()
         brand_row = QHBoxLayout(brand)
-        brand_row.setContentsMargins(12, 0, 18, 0)
-        brand_row.setSpacing(10)
-        if os.path.exists(self.icon_path):
-            mark = QLabel()
-            mark.setPixmap(
-                QPixmap(self.icon_path).scaled(
-                    28, 28,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-            )
-            brand_row.addWidget(mark)
-        self.wordmark = QLabel('Manus Ad Lunam')
-        self.wordmark.setFont(app_font(16, QFont.Weight.Bold))
-        brand_row.addWidget(self.wordmark)
+        brand_row.setContentsMargins(8, 0, 20, 0)
+        self.brand_mark = BrandMark()
+        brand_row.addWidget(self.brand_mark)
         row.addWidget(brand)
         row.addStretch(1)
 
@@ -870,9 +898,9 @@ class MADDashboard(QMainWindow):
         status_row = QHBoxLayout(status)
         status_row.setContentsMargins(18, 0, 18, 0)
         status_row.setSpacing(14)
-        self.link_pill = StatusPill('Disconnected', 'bad', min_width=136, flat=True)
+        self.link_pill = StatusPill('ESP32 · offline', 'bad', min_width=136, flat=True)
         self.link_pill.setMinimumWidth(136)
-        self.link_pill.setToolTip('ESP32 serial link')
+        self.link_pill.setToolTip('ESP32 transmitter link')
         self.top_rover_pill = StatusPill('Rover', 'idle', flat=True)
         self.top_rover_pill.setToolTip('Rover camera link')
         self.top_gesture_pill = StatusPill('Laptop', 'idle', flat=True)
@@ -890,29 +918,24 @@ class MADDashboard(QMainWindow):
         action_row = QHBoxLayout(actions)
         action_row.setContentsMargins(16, 0, 7, 0)
         action_row.setSpacing(2)
-        self.latency_label = QLabel("Frame <b>-- ms</b>")
+        self.latency_label = QLabel("Ping <b>-- ms</b>")
         self.latency_label.setObjectName('metric')
         self.latency_label.setTextFormat(Qt.TextFormat.RichText)
         self.latency_label.setFont(app_font(13, QFont.Weight.Medium))
-        self.latency_label.setToolTip('Interval between processed laptop-camera frames')
+        self.latency_label.setToolTip('Gesture camera frame interval (smoothed)')
         action_row.addWidget(self.latency_label)
         action_row.addSpacing(8)
-
-        self.reconnect_btn = PillButton('Reconnect', variant='ghost', glyph='refresh',
-                                        compact=True, height=38)
-        self.reconnect_btn.setToolTip('Re-scan for the ESP32 serial link')
-        self.reconnect_btn.clicked.connect(self.reconnect_serial)
-        action_row.addWidget(self.reconnect_btn)
 
         self.toggle_log_btn = PillButton('Show Log', variant='ghost', glyph='log',
                                          compact=True, height=38)
         self.toggle_log_btn.setFixedWidth(116)
+        self.toggle_log_btn.setToolTip('Show or hide the event log')
         self.toggle_log_btn.clicked.connect(self.toggle_log_sidebar)
         action_row.addWidget(self.toggle_log_btn)
 
         self.sources_btn = PillButton('Sources', variant='ghost', glyph='sources',
                                       compact=True, height=38)
-        self.sources_btn.setToolTip('Stop the feeds and reconfigure the stream sources')
+        self.sources_btn.setToolTip('Stop the feeds and change the stream sources')
         self.sources_btn.clicked.connect(self.prompt_source_control)
         action_row.addWidget(self.sources_btn)
         row.addWidget(actions)
@@ -926,7 +949,7 @@ class MADDashboard(QMainWindow):
         return line
 
     # -- camera feeds -------------------------------------------------------
-    def _flip_button(self, glyph, tooltip):
+    def _icon_button(self, glyph, tooltip):
         button = PillButton('', glyph=glyph, compact=True, height=30)
         button.setToolTip(tooltip)
         return button
@@ -948,47 +971,51 @@ class MADDashboard(QMainWindow):
         name = title_label(title)
         header.addWidget(name)
         header.addSpacing(4)
-        status_pill.setMinimumWidth(30)  # may elide to a dot in the inset
+        status_pill.setMinimumWidth(30)  # may shrink to its dot in the inset
         header.addWidget(status_pill)
         header.addStretch(1)
         for button in flip_buttons:
             header.addWidget(button)
-        swap = PillButton('', glyph='swap', compact=True, height=30)
-        swap.setToolTip('Make this the main view')
+        fullscreen = self._icon_button('expand', 'Fullscreen (F11 · Esc to exit)')
+        fullscreen.clicked.connect(self.toggle_rover_fullscreen)
+        header.addWidget(fullscreen)
+        swap = self._icon_button('swap', 'Make this the main view')
         swap.clicked.connect(self.swap_feeds)
         header.addWidget(swap)
         layout.addLayout(header)
         layout.addWidget(surface, 1)
 
         surface.clicked.connect(lambda: self._on_feed_clicked(surface))
-        return panel, name, swap
+        return panel, name, swap, fullscreen
 
     def _build_rover_feed(self):
         self.rover_feed_label = VideoSurface('Connecting to Camera Stream…')
         self.rover_status_label = StatusPill('Waiting for source', 'warn')
-        self.rover_flip_btn_180 = self._flip_button('flip-v', 'Flip 180°')
+        self.rover_flip_btn_180 = self._icon_button('flip-v', 'Rotate 180°')
         self.rover_flip_btn_180.clicked.connect(self.flip_rover_180)
         self.rover_flip_btn_180.set_active(self.rover_flip_180)
-        self.rover_flip_btn_horz = self._flip_button('flip-h', 'Flip horizontally')
+        self.rover_flip_btn_horz = self._icon_button('flip-h', 'Mirror')
         self.rover_flip_btn_horz.clicked.connect(self.flip_rover_horz)
-        panel, self.rover_title, self.rover_swap_btn = self._build_feed_panel(
-            'Rover Camera', self.rover_feed_label, self.rover_status_label,
-            (self.rover_flip_btn_180, self.rover_flip_btn_horz),
-        )
+        panel, self.rover_title, self.rover_swap_btn, self.rover_fullscreen_btn = \
+            self._build_feed_panel(
+                'Rover Camera', self.rover_feed_label, self.rover_status_label,
+                (self.rover_flip_btn_180, self.rover_flip_btn_horz),
+            )
         return panel
 
     def _build_laptop_feed(self):
         self.gesture_feed_label = VideoSurface('Initializing Video Stream…')
         self.gesture_status_label = StatusPill('Waiting for source', 'warn')
-        self.gesture_flip_btn_180 = self._flip_button('flip-v', 'Flip 180°')
+        self.gesture_flip_btn_180 = self._icon_button('flip-v', 'Rotate 180°')
         self.gesture_flip_btn_180.clicked.connect(self.flip_gesture_180)
         self.gesture_flip_btn_180.set_active(self.gesture_flip_180)
-        self.gesture_flip_btn_horz = self._flip_button('flip-h', 'Flip horizontally')
+        self.gesture_flip_btn_horz = self._icon_button('flip-h', 'Mirror')
         self.gesture_flip_btn_horz.clicked.connect(self.flip_gesture_horz)
-        panel, self.gesture_title, self.gesture_swap_btn = self._build_feed_panel(
-            'Laptop Camera', self.gesture_feed_label, self.gesture_status_label,
-            (self.gesture_flip_btn_180, self.gesture_flip_btn_horz),
-        )
+        panel, self.gesture_title, self.gesture_swap_btn, self.gesture_fullscreen_btn = \
+            self._build_feed_panel(
+                'Laptop Camera', self.gesture_feed_label, self.gesture_status_label,
+                (self.gesture_flip_btn_180, self.gesture_flip_btn_horz),
+            )
         return panel
 
     def _fit_rail(self, page_width):
@@ -998,22 +1025,32 @@ class MADDashboard(QMainWindow):
         video_height = (rail - 2 * PAD_FEED) * 9 / 16
         self.inset_card.setFixedHeight(int(video_height + self.FEED_HEADER + 3 * PAD_FEED))
 
+    def _hero_surface(self):
+        return self.rover_feed_label if self._hero == 'rover' else self.gesture_feed_label
+
     def _sync_feed_roles(self):
-        """Swap control and click-to-promote only make sense on the inset."""
+        """Swap belongs on the inset; fullscreen on the hero."""
         hero_is_rover = self._hero == 'rover'
-        for is_hero, swap, surface in (
-            (hero_is_rover, self.rover_swap_btn, self.rover_feed_label),
-            (not hero_is_rover, self.gesture_swap_btn, self.gesture_feed_label),
+        for is_hero, swap, fullscreen, surface in (
+            (hero_is_rover, self.rover_swap_btn, self.rover_fullscreen_btn, self.rover_feed_label),
+            (not hero_is_rover, self.gesture_swap_btn, self.gesture_fullscreen_btn, self.gesture_feed_label),
         ):
             swap.setVisible(not is_hero)
+            fullscreen.setVisible(is_hero)
             surface.setCursor(
                 Qt.CursorShape.ArrowCursor if is_hero else Qt.CursorShape.PointingHandCursor
             )
             surface.setToolTip('' if is_hero else 'Click to make this the main view')
+        self._sync_card_glow()
+
+    def _sync_card_glow(self):
+        """The card holding a live camera glows blue (Hanoon's active state)."""
+        hero, inset = ('rover', 'gesture') if self._hero == 'rover' else ('gesture', 'rover')
+        self.hero_card.set_active(self._camera_status[hero] == 'Online')
+        self.inset_card.set_active(self._camera_status[inset] == 'Online')
 
     def _on_feed_clicked(self, surface):
-        hero_surface = self.rover_feed_label if self._hero == 'rover' else self.gesture_feed_label
-        if surface is not hero_surface:
+        if surface is not self._hero_surface():
             self.swap_feeds()
 
     def swap_feeds(self):
@@ -1034,12 +1071,13 @@ class MADDashboard(QMainWindow):
 
         self._hero = 'gesture' if inset_panel is self.gesture_panel else 'rover'
         self._sync_feed_roles()
+        self._refresh_overlay()
         camera = 'laptop' if self._hero == 'gesture' else 'rover'
         self.log_box.append(f'[CAM] Main view switched to the {camera} camera')
 
     # -- control strip ------------------------------------------------------
     def _build_control_strip(self):
-        """Drive command | speed limit | manual control, under the hero feed."""
+        """Drive command | speed limit | system link, under the hero feed."""
         strip = QWidget()
         strip.setFixedHeight(186)
         row = QHBoxLayout(strip)
@@ -1047,21 +1085,35 @@ class MADDashboard(QMainWindow):
         row.setSpacing(16)
         row.addWidget(self._build_drive_card(), 1)
         row.addWidget(self._build_speed_card(), 1)
-        row.addWidget(self._build_manual_card(), 1)
+        row.addWidget(self._build_link_card(), 1)
         return strip
 
     def _build_drive_card(self):
-        """Active drive command: oversized code beside a direction compass."""
+        """Active command, with key caps in keyboard mode and the compass in gesture mode."""
         drive_card = GlassCard('Drive Command', spacing=8)
         drive_card.body.addStretch(1)
         drive_row = QHBoxLayout()
-        drive_row.setSpacing(12)
-        self.payload_label = NumeralLabel('S', size=64, color=WARN)
-        self.direction_indicator = DirectionIndicator()
+        drive_row.setSpacing(10)
+        self.payload_label = CommandLabel('S', size=58, color=CMD_STOP)
         drive_row.addWidget(self.payload_label, 1, Qt.AlignmentFlag.AlignVCenter)
-        drive_row.addWidget(self.direction_indicator, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self.direction_indicator = DirectionIndicator()
+        self.key_caps = KeyCaps()
+        self.drive_visual = QStackedWidget()
+        for widget in (self.direction_indicator, self.key_caps):
+            page = QWidget()
+            page_layout = QHBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.addWidget(widget, 0, Qt.AlignmentFlag.AlignCenter)
+            self.drive_visual.addWidget(page)
+        self.drive_visual.setFixedSize(
+            max(self.key_caps.width(), self.direction_indicator.width()),
+            max(self.key_caps.height(), self.direction_indicator.height()),
+        )
+        drive_row.addWidget(self.drive_visual, 0, Qt.AlignmentFlag.AlignVCenter)
         drive_card.body.addLayout(drive_row)
-        self.payload_sub = caption_label('Active command')
+
+        self.payload_sub = caption_label('Gesture command')
         drive_card.body.addWidget(self.payload_sub)
         drive_card.body.addStretch(1)
         return drive_card
@@ -1096,30 +1148,38 @@ class MADDashboard(QMainWindow):
         speed_card.body.addStretch(1)
         return speed_card
 
-    def _build_manual_card(self):
-        """Live W A S D key caps, plus the serial link they drive through."""
-        card = GlassCard('Manual Control', spacing=8)
+    def _build_link_card(self):
+        """Hanoon's system link, as a status list with a 'check again' icon."""
+        card = GlassCard(spacing=4)
+        header = QHBoxLayout()
+        header.addWidget(caption_label('System Link'))
+        header.addStretch(1)
+        self.reconnect_btn = PillButton('', glyph='refresh', compact=True, height=30)
+        self.reconnect_btn.setToolTip('Check for the ESP32 again')
+        self.reconnect_btn.clicked.connect(self.reconnect_serial)
+        header.addWidget(self.reconnect_btn)
+        card.body.addLayout(header)
         card.body.addStretch(1)
 
-        keys_row = QHBoxLayout()
-        keys_row.setSpacing(14)
-        self.key_caps = KeyCaps()
-        keys_row.addWidget(self.key_caps, 0, Qt.AlignmentFlag.AlignVCenter)
-        hint = QLabel('Hold to drive.\nGestures resume\non release.')
-        hint.setObjectName('helper')
-        keys_row.addWidget(hint, 1, Qt.AlignmentFlag.AlignVCenter)
-        card.body.addLayout(keys_row)
+        self.rover_link_row = StatusRow('Rover', 'Offline', 'bad')
+        # port_label keeps its name: it is the transmitter (ESP32 serial) status.
+        self.port_label = StatusRow('Transmitter', 'Offline', 'bad')
+        self.mode_row = StatusRow('Control', 'Gesture', 'warn')
+        for status_row in (self.rover_link_row, self.port_label, self.mode_row):
+            card.body.addWidget(status_row)
+            card.body.addSpacing(4)
         card.body.addStretch(1)
+        return card
 
-        status_text = (
-            self._link_html(f'Connected · {self.sender.port}', OK)
-            if self.is_serial_connected
-            else self._link_html('Disconnected', BAD)
+    def _build_telemetry_card(self):
+        """Hanoon's live telemetry: closest radar echo and ping over 30 s."""
+        card = GlassCard('Live Telemetry', padding=16, spacing=6)
+        self.radar_graph = TelemetryGraph(
+            'Radar distance', 'cm', ACCENT_LIGHT, cap=100, threshold=RADAR_DANGER_CM, mode='min'
         )
-        self.port_label = QLabel(status_text)
-        self.port_label.setTextFormat(Qt.TextFormat.RichText)
-        self.port_label.setFont(app_font(13, QFont.Weight.DemiBold))
-        card.body.addWidget(self.port_label)
+        self.latency_graph = TelemetryGraph('Ping', 'ms', ACCENT, min_span=60.0, mode='avg')
+        card.body.addWidget(self.radar_graph, 1)
+        card.body.addWidget(self.latency_graph, 1)
         return card
 
     def _build_log_dock(self):
@@ -1147,21 +1207,19 @@ class MADDashboard(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.logs_dock)
         self.logs_dock.hide()
 
-    TOP_BAR_COMPACT_BELOW = 1080  # px; under this the header drops to icon-only
-
     def eventFilter(self, watched, event):
         if event.type() == event.Type.Resize:
             if watched is getattr(self, 'top_bar', None):
-                self._apply_top_bar_density(watched.width() < self.TOP_BAR_COMPACT_BELOW)
+                self._apply_top_bar_density(watched.width())
             elif watched is getattr(self, 'command_page', None):
                 self._fit_rail(watched.width())
         return super().eventFilter(watched, event)
 
-    def _apply_top_bar_density(self, compact):
-        """Narrow window or open log: hide the wordmark, make buttons icon-only."""
-        self.wordmark.setVisible(not compact)
-        for button, label in ((self.reconnect_btn, 'Reconnect'), (self.sources_btn, 'Sources')):
-            button.setText('' if compact else label)
+    def _apply_top_bar_density(self, width):
+        """Narrow window or open log: mark only, icon-only actions."""
+        compact = width < self.TOP_BAR_COMPACT_BELOW
+        self.brand_mark.set_density(0 if compact else (2 if width >= self.TOP_BAR_TAGLINE_FROM else 1))
+        self.sources_btn.setText('' if compact else 'Sources')
 
     def _lock_command_focus(self):
         """Stop page-2 controls from stealing focus, so WASD always reaches us."""
@@ -1205,6 +1263,8 @@ class MADDashboard(QMainWindow):
 
     def prompt_source_control(self):
         """Return to Mission Connect, stopping the feeds on the way out."""
+        if self._rover_focus:
+            self.toggle_rover_fullscreen()
         self._stop_streams()
         self.radar_timer.stop()
         self.radar_visual.reset_reading('STANDBY')
@@ -1248,6 +1308,43 @@ class MADDashboard(QMainWindow):
         self.update_gesture_camera_status('Stopped')
         self.update_rover_camera_status('Stopped')
 
+    # ------------------------------------------------------------ fullscreen --
+    def toggle_rover_fullscreen(self):
+        """Hanoon's fullscreen: the hero feed takes the whole screen; its command
+        and speed ride along as a chip on the video."""
+        if self.stack.currentWidget() is not self.command_page:
+            return
+        entering = not self._rover_focus
+        self._rover_focus = entering
+        for widget in (self.top_bar, self.rail, self.control_strip):
+            widget.setVisible(not entering)
+        if entering:
+            self._log_was_open = self.logs_dock.isVisible()
+            self.logs_dock.hide()
+            self._was_maximized = self.isMaximized()
+            self.showFullScreen()
+        else:
+            if self._was_maximized:
+                self.showMaximized()
+            else:
+                self.showNormal()
+            if self._log_was_open:
+                self.logs_dock.show()
+        for button in (self.rover_fullscreen_btn, self.gesture_fullscreen_btn):
+            button.set_glyph('collapse' if entering else 'expand')
+            button.setToolTip('Exit fullscreen (Esc)' if entering else 'Fullscreen (F11 · Esc to exit)')
+        self._refresh_overlay()
+
+    def _refresh_overlay(self):
+        """In fullscreen the hidden drive and speed cards are summarised on the video."""
+        for surface in (self.rover_feed_label, self.gesture_feed_label):
+            surface.set_overlay(None)
+        if self._rover_focus:
+            self._hero_surface().set_overlay(
+                f'{self.current_payload}    {self.speed_slider.value()}%',
+                command_color(self.current_payload),
+            )
+
     # --- KEYBOARD CONTROLS ---
     def keyPressEvent(self, event):
         """Processes W, A, S, D key presses."""
@@ -1255,6 +1352,9 @@ class MADDashboard(QMainWindow):
             return  # Prevent OS key repeat flooding
 
         key = event.key()
+        if key == Qt.Key.Key_F11 or (key == Qt.Key.Key_Escape and self._rover_focus):
+            self.toggle_rover_fullscreen()
+            return
         if key in (Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D):
             self.pressed_keys.add(key)
             self.process_keyboard_input()
@@ -1279,10 +1379,14 @@ class MADDashboard(QMainWindow):
         has_s = Qt.Key.Key_S in self.pressed_keys
         has_a = Qt.Key.Key_A in self.pressed_keys
         has_d = Qt.Key.Key_D in self.pressed_keys
-        self.key_caps.set_pressed(
-            letter for letter, held in (('W', has_w), ('A', has_a), ('S', has_s), ('D', has_d))
-            if held
-        )
+        held = [letter for letter, down in (('W', has_w), ('A', has_a), ('S', has_s), ('D', has_d))
+                if down]
+        self.key_caps.set_pressed(held)
+        if held:
+            self._mode_timer.stop()
+            self._set_control_mode('keyboard')
+        else:
+            self._mode_timer.start(KEYBOARD_MODE_HOLD_MS)
 
         cmd = "S"
         if has_w:
@@ -1302,15 +1406,38 @@ class MADDashboard(QMainWindow):
 
         self.dispatch_command(cmd)
 
+    def _end_keyboard_mode(self):
+        if not self.pressed_keys:
+            self._set_control_mode('gesture')
+
+    def _set_control_mode(self, mode):
+        if mode == self._control_mode:
+            return
+        self._control_mode = mode
+        keyboard = mode == 'keyboard'
+        self.drive_visual.setCurrentIndex(1 if keyboard else 0)
+        self.payload_sub.setText('KEYBOARD COMMAND' if keyboard else 'GESTURE COMMAND')
+        self._refresh_mode_row()
+
+    def _refresh_mode_row(self):
+        if self._control_mode == 'keyboard':
+            self.mode_row.set_state('accent', 'Keyboard')
+        elif self._camera_status['gesture'] == 'Online':
+            self.mode_row.set_state('ok', 'Gesture')
+        else:
+            self.mode_row.set_state('warn', 'Gesture · no camera')
+
     def dispatch_command(self, command):
         """Sends payload down serial line and updates UI if command changed."""
         if command != self.current_payload:
             self.current_payload = command
             self.payload_label.setText(command)
-            moving = command != 'S'
-            self.payload_label.set_color(ACCENT_LIGHT if moving else WARN)
-            self.direction_indicator.set_command(command)
-            self.speed_status_label.setText('TRANSMITTING' if moving else 'HOLDING')
+            color = command_color(command)
+            self.payload_label.set_color(color)
+            self.direction_indicator.set_command(command, color)
+            self.key_caps.set_color(color)
+            self.speed_status_label.setText('TRANSMITTING' if command != 'S' else 'HOLDING')
+            self._refresh_overlay()
 
             if self.is_serial_connected:
                 if self.sender.send_command(command, self.speed_pwm):
@@ -1332,12 +1459,23 @@ class MADDashboard(QMainWindow):
         """Update the display and resend the active command at the new PWM speed."""
         self.speed_pwm = round(value * 255 / 100)
         self.speed_value_label.setText(f'{value}%')
+        self._refresh_overlay()
         if self.is_serial_connected:
             if not self.sender.send_command(self.current_payload, self.speed_pwm):
                 self.mark_serial_disconnected('Speed update write failed')
 
     def poll_radar_telemetry(self):
         """Read tagged distance samples from the transmitter's USB serial stream."""
+        radar_was_live = self.last_radar_update_time is not None
+        self._read_radar_telemetry()
+        if (self.last_radar_update_time is not None) != radar_was_live:
+            self._refresh_rover_row()
+
+    def _read_radar_telemetry(self):
+        if self._radar_alert_until and time.monotonic() > self._radar_alert_until:
+            self._radar_alert_until = 0.0
+            self.radar_box.set_alert(False)
+
         if not self.is_serial_connected:
             return
 
@@ -1349,6 +1487,12 @@ class MADDashboard(QMainWindow):
                 status = 'RADAR LIVE'
             self.radar_visual.update_reading(angle, distance_cm)
             self.radar_visual.set_status(status)
+            if distance_cm > 0:
+                self.radar_graph.add(distance_cm)
+            if 0 < distance_cm <= RADAR_DANGER_CM:
+                # Hanoon's alert: the radar card glows red for a second.
+                self._radar_alert_until = time.monotonic() + 1.0
+                self.radar_box.set_alert(True)
 
         if self.is_serial_connected and (
             self.sender.ser is None or not self.sender.ser.is_open
@@ -1363,16 +1507,27 @@ class MADDashboard(QMainWindow):
         if time.monotonic() - self.last_radar_update_time > 1.5:
             self.last_radar_update_time = None
             self.radar_visual.reset_reading('NO RADAR DATA')
+            self._radar_alert_until = 0.0
+            self.radar_box.set_alert(False)
 
     # ------------------------------------------------------------- feeds ----
     def update_gesture_feed(self, qt_image, raw_frame):
         now = time.monotonic()
-        interval_ms = int((now - self.last_frame_time) * 1000)
+        interval_ms = (now - self.last_frame_time) * 1000.0
         self.last_frame_time = now
-        self.latency_label.setText(
-            f"<span style='color: {css(INK, 0.45)};'>Frame</span> "
-            f"<b style='color: {ACCENT_LIGHT};'>{interval_ms} ms</b>"
-        )
+
+        # Smooth the number and repaint the header at ~4 Hz instead of every frame.
+        if self._interval_ms is None:
+            self._interval_ms = interval_ms
+        else:
+            self._interval_ms = self._interval_ms * 0.8 + interval_ms * 0.2
+        if now - self._ping_ui_time >= 0.25:
+            self._ping_ui_time = now
+            self.latency_label.setText(
+                f"<span style='color: {css(INK, 0.45)};'>Ping</span> "
+                f"<b style='color: {ACCENT_LIGHT};'>{int(self._interval_ms)} ms</b>"
+            )
+        self.latency_graph.add(self._interval_ms)
 
         label_size = self.gesture_feed_label.size()
         if label_size.width() > 0 and label_size.height() > 0:
@@ -1416,83 +1571,99 @@ class MADDashboard(QMainWindow):
         state = self._camera_state(status)
         self.gesture_status_label.set_state(state, status)
         self.top_gesture_pill.set_state(state)
+        self._camera_status['gesture'] = status
+        self._sync_card_glow()
+        self._refresh_mode_row()
 
     def update_rover_camera_status(self, status):
         state = self._camera_state(status)
         self.rover_status_label.set_state(state, status)
         self.top_rover_pill.set_state(state)
+        self._camera_status['rover'] = status
+        self._sync_card_glow()
+        self._refresh_rover_row()
 
     # ------------------------------------------------------ flip controls ---
+    def _toggle_flip(self, camera, kind):
+        """Hanoon's fix: one flip mode at a time, because cv2.flip takes a single
+        code -- none (0), mirror (1) or 180° (-1) -- so the buttons always show
+        what the camera is actually doing."""
+        horz = getattr(self, f'{camera}_flip_horz')
+        rot = getattr(self, f'{camera}_flip_180')
+        if kind == 'horz':
+            horz = not horz
+            if horz:
+                rot = False
+        else:
+            rot = not rot
+            if rot:
+                horz = False
+        setattr(self, f'{camera}_flip_horz', horz)
+        setattr(self, f'{camera}_flip_180', rot)
+        getattr(self, f'{camera}_flip_btn_horz').set_active(horz)
+        getattr(self, f'{camera}_flip_btn_180').set_active(rot)
+
+        thread = getattr(self, f'{camera}_thread')
+        if thread and thread.isRunning():
+            thread.flip = 1 if horz else (-1 if rot else 0)
+            mode = 'FLIP HORZ' if horz else ('FLIP 180°' if rot else 'NO FLIP')
+            self.log_box.append(f'[CAM] {camera.capitalize()} camera set to {mode} flip')
+
     def flip_gesture_horz(self):
         """Toggle horizontal flip for gesture camera"""
-        self.gesture_flip_horz = not self.gesture_flip_horz
-
-        if self.gesture_thread and self.gesture_thread.isRunning():
-            flip_mode = 1 if self.gesture_flip_horz else 0
-            self.gesture_thread.flip = flip_mode
-            mode = "FLIP HORZ" if self.gesture_flip_horz else "NO FLIP"
-            self.gesture_flip_btn_horz.set_active(self.gesture_flip_horz)
-            self.gesture_flip_btn_horz.setToolTip(mode.title())
-
-            log_msg = f'[CAM] Gesture camera set to {mode} flip'
-            self.log_box.append(log_msg)
+        self._toggle_flip('gesture', 'horz')
 
     def flip_gesture_180(self):
         """Toggle 180° flip for gesture camera"""
-        self.gesture_flip_180 = not self.gesture_flip_180
-
-        if self.gesture_thread and self.gesture_thread.isRunning():
-            flip_mode = -1 if self.gesture_flip_180 else 0
-            self.gesture_thread.flip = flip_mode
-            mode = "FLIP 180°" if self.gesture_flip_180 else "NO FLIP"
-            self.gesture_flip_btn_180.set_active(self.gesture_flip_180)
-            self.gesture_flip_btn_180.setToolTip(mode.title())
-
-            log_msg = f'[CAM] Gesture camera set to {mode} flip'
-            self.log_box.append(log_msg)
+        self._toggle_flip('gesture', '180')
 
     def flip_rover_horz(self):
         """Toggle horizontal flip for rover camera"""
-        self.rover_flip_horz = not self.rover_flip_horz
-
-        if self.rover_thread and self.rover_thread.isRunning():
-            flip_mode = 1 if self.rover_flip_horz else 0
-            self.rover_thread.flip = flip_mode
-            mode = "FLIP HORZ" if self.rover_flip_horz else "NO FLIP"
-            self.rover_flip_btn_horz.set_active(self.rover_flip_horz)
-            self.rover_flip_btn_horz.setToolTip(mode.title())
-
-            log_msg = f'[CAM] Rover camera set to {mode} flip'
-            self.log_box.append(log_msg)
+        self._toggle_flip('rover', 'horz')
 
     def flip_rover_180(self):
         """Toggle 180° flip for rover camera"""
-        self.rover_flip_180 = not self.rover_flip_180
+        self._toggle_flip('rover', '180')
 
-        if self.rover_thread and self.rover_thread.isRunning():
-            flip_mode = -1 if self.rover_flip_180 else 0
-            self.rover_thread.flip = flip_mode
-            mode = "FLIP 180°" if self.rover_flip_180 else "NO FLIP"
-            self.rover_flip_btn_180.set_active(self.rover_flip_180)
-            self.rover_flip_btn_180.setToolTip(mode.title())
+    # ---------------------------------------------------------- system link --
+    def _set_transmitter(self, state, detail=''):
+        """ESP32 serial link: System Link row and header pill."""
+        self._link_state = state
+        self._link_detail = detail
+        value, token = {
+            'connected': (f'Online · {detail}' if detail else 'Online', 'ok'),
+            'connecting': ('Connecting…', 'warn'),
+            'disconnected': ('Offline', 'bad'),
+        }[state]
+        self.port_label.set_state(token, value)
+        pill = {
+            'connected': f'ESP32 · {detail}' if detail else 'ESP32 · online',
+            'connecting': 'ESP32 · connecting',
+            'disconnected': 'ESP32 · offline',
+        }[state]
+        self.link_pill.set_state(token, pill)
 
-            log_msg = f'[CAM] Rover camera set to {mode} flip'
-            self.log_box.append(log_msg)
+    def _refresh_rover_row(self):
+        """The rover counts as online while its camera or its radar is live."""
+        camera = self._camera_status['rover'] == 'Online'
+        radar = self.last_radar_update_time is not None
+        if camera or radar:
+            via = ' and '.join(name for name, live in (('camera', camera), ('radar', radar)) if live)
+            self.rover_link_row.set_state('ok', 'Online')
+            self.rover_link_row.setToolTip(f'Rover reachable: {via} live')
+        else:
+            self.rover_link_row.set_state('bad', 'Offline')
+            self.rover_link_row.setToolTip('No rover camera feed and no radar telemetry')
 
     # ------------------------------------------------------------- serial ---
-    @staticmethod
-    def _link_html(label, token):
-        return (f"<span style='color: {css(INK, 0.55)};'>ESP32</span>&nbsp; "
-                f"<span style='color: {token};'>{label}</span>")
-
     def reconnect_serial(self):
         if self.serial_connect_worker is not None and self.serial_connect_worker.isRunning():
             return
 
         self.is_serial_connected = False
         self.reconnect_btn.setEnabled(False)
-        self.port_label.setText(self._link_html('Connecting…', WARN))
-        self.link_pill.set_state('warn', 'Connecting…')
+        self.reconnect_btn.set_busy(True)
+        self._set_transmitter('connecting')
         self.log_box.append('[SYS] Attempting ESP32 re-connection...')
         self.serial_connect_worker = SerialConnectWorker(self.sender, self)
         self.serial_connect_worker.connection_finished.connect(self.on_serial_connect_finished)
@@ -1500,30 +1671,30 @@ class MADDashboard(QMainWindow):
 
     def mark_serial_disconnected(self, reason):
         self.is_serial_connected = False
-        self.port_label.setText(self._link_html('Disconnected', BAD))
-        self.link_pill.set_state('bad', 'Disconnected')
+        self._set_transmitter('disconnected')
         self.radar_visual.set_status('SERIAL LINK OFFLINE')
+        self._radar_alert_until = 0.0
+        self.radar_box.set_alert(False)
         self.log_box.append(f'[SYS] Serial connection lost: {reason}.')
 
     def on_serial_connect_finished(self, connected, detail):
         self.is_serial_connected = connected
         self.reconnect_btn.setEnabled(True)
+        self.reconnect_btn.set_busy(False)
         if connected:
-            self.port_label.setText(self._link_html(f'Connected · {detail}', OK))
-            self.link_pill.set_state('ok', f'Linked · {detail}')
+            self._set_transmitter('connected', detail)
             self.log_box.append(f'[SYS] Linked to ESP32 on port {detail}')
             if not self.sender.send_command(self.current_payload, self.speed_pwm):
                 self.mark_serial_disconnected('Telemetry handshake failed')
         else:
-            self.port_label.setText(self._link_html('Disconnected', BAD))
-            self.link_pill.set_state('bad', 'Disconnected')
+            self._set_transmitter('disconnected')
             self.log_box.append('[SYS] Search failed. No active ESP32 COM port.')
             if detail:
                 self.log_box.append(f'[SYS] Connection detail: {detail}')
 
     # ------------------------------------------------------------ window ----
     def changeEvent(self, event):
-        """Park the starfield animation while the window is minimised."""
+        """Park the backdrop animation while the window is minimised."""
         super().changeEvent(event)
         if event.type() == event.Type.WindowStateChange:
             self.background.set_animating(not self.isMinimized())

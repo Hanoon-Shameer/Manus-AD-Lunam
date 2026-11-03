@@ -1,23 +1,21 @@
 """Design system for Project MANUS AD LUNAM.
 
-Everything visual lives here: the palette, the type scale, and the reusable
-widgets the dashboard composes. Tweak the token block at the top and the whole
-app follows.
+Everything visual lives here: the palette, the type scale, the backdrop, and
+the reusable widgets the dashboard composes. Tweak the token block at the top
+and the whole app follows.
 
-Mood: Apple's Liquid Glass language (iOS 26 onward) applied to lunar mission
-control. Floating glass capsules, concentric corner radii, surfaces that
-refract a frosted copy of the scene behind them, one restrained accent, and
-semantic colour used only to signal state.
-
-The backdrop is an "Earthrise": the lunar horizon along the bottom, Earth hanging
-in the black sky, and a faint transfer trajectory between them.
+Look: Apple's Liquid Glass language (iOS 26 onward) for the surfaces -- floating
+glass capsules, concentric corner radii, frosted glass that samples the scene
+behind it -- over Hanoon's dark grey "plexus" backdrop, set on the lunar surface:
+a textured moon horizon, a slow Earthrise, and one constellation shaped like
+the rover itself.
 
 Performance notes (the camera feeds share this GUI thread):
-  * The scene is baked into a pixmap once per resize, together with a blurred
-    copy that glass surfaces sample. No live blur is ever computed.
-  * Only ~90 bright stars animate. They repaint as small damaged rects and are
-    skipped entirely when they sit behind glass, so cards and video are not
-    recomposited by the background.
+  * The backdrop is baked into a pixmap once per resize, with a blurred copy that
+    glass surfaces sample. No live blur is ever computed.
+  * Live elements -- ~60 twinkling stars with mouse parallax, and Earth while it
+    rises -- repaint as small rects, and are skipped while covered by glass.
+  * Once Earth has risen it is baked into the backdrop and stops costing anything.
   * Nothing here puts a graphics effect over live video.
 """
 
@@ -27,6 +25,7 @@ import math
 import random
 import time
 import weakref
+from collections import deque
 from html import escape
 
 from PyQt6.QtCore import (
@@ -39,12 +38,14 @@ from PyQt6.QtCore import (
     QSize,
     Qt,
     QTimer,
+    QVariantAnimation,
     pyqtProperty,
     pyqtSignal,
 )
 from PyQt6.QtGui import (
     QBrush,
     QColor,
+    QCursor,
     QFont,
     QFontMetrics,
     QFontMetricsF,
@@ -55,7 +56,6 @@ from PyQt6.QtGui import (
     QPixmap,
     QRadialGradient,
     QTextCursor,
-    QTransform,
 )
 from PyQt6.QtWidgets import (
     QFrame,
@@ -72,21 +72,23 @@ from PyQt6.QtWidgets import (
 # TOKENS -- the whole look is driven from this block
 # ---------------------------------------------------------------------------
 
-# Deep space gradient
-BG_TOP = "#04060B"
-BG_MID = "#070A14"
-BG_BOTTOM = "#0A0E1A"
+# Backdrop: Hanoon's dark grey gradient
+BG_TOP = "#0B0C0E"
+BG_MID = "#17181B"
+BG_BOTTOM = "#26282C"
 
 # Scenery
-NEBULA_A = "#2B2456"      # violet bloom
-NEBULA_B = "#113158"      # blue bloom
-MOONLIGHT = "#CFE2FF"     # star halos
+MOONLIGHT = "#CFE2FF"     # star halos, earthshine
 EARTH_SEA = "#2F6FD0"
 EARTH_DAY = "#A8D8FF"
 EARTH_NIGHT = "#08111F"
-REGOLITH_LIT = "#2A2F3A"  # lunar surface at the horizon
-REGOLITH_DARK = "#0B0D13"
+REGOLITH_LIT = "#2C2E33"  # lunar surface at the horizon
+REGOLITH_MID = "#1B1D21"
+REGOLITH_DARK = "#0D0E10"
 HORIZON = 0.14            # fraction of the window height the moon occupies
+EARTHRISE_DELAY = 1.5     # seconds after launch before Earth starts to rise
+EARTHRISE_SECONDS = 90.0  # how long the rise takes
+PARALLAX_PX = 8.0         # how far the nearest stars shift with the mouse
 
 INK = "#FFFFFF"
 
@@ -97,8 +99,14 @@ ACCENT_LIGHT = "#64D2FF"
 # Semantic state colours -- only ever used to mean something
 OK = "#30D158"
 WARN = "#FFD60A"
+ORANGE = "#FF9F0A"
 BAD = "#FF453A"
 IDLE = "#8E99AD"
+
+# Drive command colours (Hanoon): forward, reverse, stop
+CMD_FORWARD = OK
+CMD_REVERSE = ORANGE
+CMD_STOP = BAD
 
 # Geometry. Radii are concentric: an inner radius is the outer radius minus
 # the padding between them, which is what keeps nested glass looking right.
@@ -137,14 +145,23 @@ MONO_FAMILIES = [
     "Courier New",
 ]
 
-# Readouts: oversized thin numerals over tiny letter-spaced capitals. The
-# contrast in size and weight is what carries the hierarchy. Qt falls back to
-# the lightest weight the font provides (Segoe UI Light on Windows).
+# Readouts: oversized thin numerals over tiny letter-spaced capitals. Qt falls
+# back to the lightest weight the font provides (Segoe UI Light on Windows).
 NUMERAL_WEIGHT = QFont.Weight.ExtraLight
+# The drive command letters: a bold display face. Bahnschrift ships with
+# Windows 10+ and has the squared, instrument-panel feel; SF Pro Rounded on Macs.
+COMMAND_FAMILIES = [
+    "SF Pro Rounded",
+    "Bahnschrift",
+    "Segoe UI Variable Display",
+    "Segoe UI",
+    "Arial",
+]
 MICRO_SIZE = 10
 MICRO_SPACING = 1.4
 
 STARFIELD_SEED = 20260713  # fixed, so the sky is the same every launch
+PLEXUS_SEED = 7            # Hanoon's dot network layout
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +197,16 @@ def app_font(
     return font
 
 
+def numeral_font(size: int) -> QFont:
+    """Large thin numerals for live readouts."""
+    return app_font(size, NUMERAL_WEIGHT)
+
+
+def micro_font(size: int = MICRO_SIZE) -> QFont:
+    """Tiny upper-case caption face."""
+    return app_font(size, QFont.Weight.DemiBold, spacing=MICRO_SPACING)
+
+
 def state_color(state: str) -> str:
     """Map a semantic state name onto its token."""
     return {
@@ -192,14 +219,14 @@ def state_color(state: str) -> str:
     }.get(state, IDLE)
 
 
-def numeral_font(size: int) -> QFont:
-    """Large thin numerals for live readouts."""
-    return app_font(size, NUMERAL_WEIGHT)
-
-
-def micro_font(size: int = MICRO_SIZE) -> QFont:
-    """Tiny upper-case caption face."""
-    return app_font(size, QFont.Weight.DemiBold, spacing=MICRO_SPACING)
+def command_color(command: str) -> str:
+    """Hanoon's drive colours: forward green, reverse orange, stop red."""
+    command = (command or "S").upper()
+    if command.startswith("F"):
+        return CMD_FORWARD
+    if command.startswith("B"):
+        return CMD_REVERSE
+    return CMD_STOP
 
 
 def caption_label(text: str, parent: QWidget | None = None) -> QLabel:
@@ -222,6 +249,11 @@ def rounded_path(rect: QRectF, radius: float) -> QPainterPath:
     path = QPainterPath()
     path.addRoundedRect(rect, radius, radius)
     return path
+
+
+def smoothstep(t: float) -> float:
+    t = max(0.0, min(1.0, t))
+    return t * t * (3.0 - 2.0 * t)
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +307,20 @@ def paint_glyph(painter: QPainter, name: str, rect: QRectF, color: QColor,
             head.lineTo(QPointF(tip - sign * unit * 0.34, y + unit * 0.30))
             painter.drawPath(head)
 
+    elif name in ("expand", "collapse"):
+        # four corner brackets, pointing out (expand) or in (collapse)
+        reach, arm = unit * 0.78, unit * 0.40
+        inward = name == "collapse"
+        for sx in (-1.0, 1.0):
+            for sy in (-1.0, 1.0):
+                corner = QPointF(cx + sx * (reach - arm if inward else reach),
+                                 cy + sy * (reach - arm if inward else reach))
+                direction = 1.0 if inward else -1.0
+                bracket = QPainterPath(QPointF(corner.x(), corner.y() + direction * sy * arm))
+                bracket.lineTo(corner)
+                bracket.lineTo(QPointF(corner.x() + direction * sx * arm, corner.y()))
+                painter.drawPath(bracket)
+
     elif name in ("flip-h", "flip-v"):
         if name == "flip-v":
             painter.translate(cx, cy)
@@ -320,25 +366,45 @@ def paint_glyph(painter: QPainter, name: str, rect: QRectF, color: QColor,
 
 
 # ---------------------------------------------------------------------------
-# StarfieldBackground -- the Earthrise scene
+# StarfieldBackground -- the backdrop
 # ---------------------------------------------------------------------------
 
+# The rover constellation: star positions in a 1.0 x 0.78 box, and the lines
+# between them. Chassis, camera mast, antenna, rocker-bogie and three wheels.
+ROVER_STARS = {
+    "nose": (0.08, 0.42), "tail": (0.88, 0.42),
+    "tail_low": (0.88, 0.56), "nose_low": (0.08, 0.56),
+    "mast_base": (0.70, 0.42), "mast_top": (0.70, 0.15),
+    "cam_l": (0.60, 0.11), "cam_r": (0.82, 0.11),
+    "ant_base": (0.22, 0.42), "ant_top": (0.22, 0.24),
+    "pivot_f": (0.30, 0.56), "pivot_r": (0.64, 0.56),
+    "wheel_1": (0.14, 0.72), "wheel_2": (0.47, 0.72), "wheel_3": (0.82, 0.72),
+}
+ROVER_LINES = (
+    ("nose", "tail"), ("tail", "tail_low"), ("tail_low", "nose_low"), ("nose_low", "nose"),
+    ("mast_base", "mast_top"), ("cam_l", "mast_top"), ("mast_top", "cam_r"),
+    ("ant_base", "ant_top"),
+    ("wheel_1", "pivot_f"), ("pivot_f", "wheel_2"),
+    ("wheel_2", "pivot_r"), ("pivot_r", "wheel_3"),
+)
+ROVER_WHEELS = ("wheel_1", "wheel_2", "wheel_3")
+
+
 class StarfieldBackground(QWidget):
-    """Deep-space backdrop seen from the lunar surface.
+    """Backdrop seen from the lunar surface.
 
-    Baked once per resize: sky gradient, nebula blooms, two dim star layers,
-    Earth with its atmosphere glow, a dashed Earth-to-Moon transfer trajectory,
-    the lunar horizon with a few foreshortened craters, and a vignette. A
-    blurred copy of the result is kept for glass surfaces to sample.
+    Baked once per resize: Hanoon's grey gradient and plexus dot network, the
+    rover constellation, the textured lunar horizon and a vignette, plus a
+    blurred copy that glass surfaces sample.
 
-    Animated: the nearest star layer -- slow parallax drift and a gentle
-    twinkle -- repainting as small rects only where no glass covers them.
+    Live: ~60 twinkling stars that drift slowly and shift with the mouse
+    (nearer stars more, so depth reads), and Earth rising over the horizon for
+    the first minute and a half, after which it is baked in too.
     """
 
-    # (stars per megapixel, radius, alpha) for the two baked layers
-    BAKED_LAYERS = ((520, 0.60, 0.30), (240, 0.95, 0.52))
-    LIVE_STARS = 90
+    LIVE_STARS = 60
     FRAME_MS = 33  # ~30 fps
+    STAR_DEPTH = (0.35, 0.65, 1.0)  # parallax share per star tier
 
     def __init__(self, parent: QWidget | None = None, seed: int = STARFIELD_SEED):
         super().__init__(parent)
@@ -346,7 +412,7 @@ class StarfieldBackground(QWidget):
         self._sky: QPixmap | None = None
         self._frost: QPixmap | None = None
         self._sky_dpr = 1.0
-        self._earth_rect = QRect()
+        self._sky_path = QPainterPath()         # open sky above the horizon
         self._live: list[dict] = []
         self._rects: list[QRect] = []           # last painted rect per live star
         self._sprites: dict[int, QPixmap] = {}  # pre-rendered star per tier
@@ -354,6 +420,13 @@ class StarfieldBackground(QWidget):
         self._covered_age = 0
         self._phase = 0.0
         self._t0 = time.monotonic()
+        self._parallax = QPointF(0.0, 0.0)      # eased, -1..1 on each axis
+
+        # Earthrise: a live sprite until it settles, then baked into the sky.
+        self._earth_baked = False
+        self._earth_sprite: QPixmap | None = None
+        self._earth_rect = QRect()       # sprite (with glow) in our coordinates
+        self._earth_disc = QRect()       # the planet itself; stars never cross it
 
         # Opaque: the sky pixmap covers every pixel, so Qt need not paint under us.
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
@@ -398,19 +471,23 @@ class StarfieldBackground(QWidget):
         dx = min(abs(x - center.x()), radius)
         return center.y() - math.sqrt(radius * radius - dx * dx)
 
+    def _rover_box(self, width: float, height: float) -> QRectF:
+        size = min(width, height) * 0.30
+        return QRectF(width * 0.05, height * 0.10, size, size * 0.78)
+
     def _build_live_stars(self) -> None:
         rng = random.Random(self._seed ^ 0x5EED)
         width, height = max(self.width(), 1), max(self.height(), 1)
-        # The horizon crown is its highest point, so this keeps every drifting
-        # star in open sky.
-        sky_floor = height * (1.0 - HORIZON) - 8
+        # The horizon crown is its highest point; keep drifting stars (plus
+        # their parallax travel) in open sky.
+        sky_floor = height * (1.0 - HORIZON) - PARALLAX_PX - 8
         self._live = []
         for _ in range(self.LIVE_STARS):
             tier = rng.choice((0, 1, 2))
             self._live.append(
                 {
                     "x0": rng.uniform(0, width),
-                    "y": rng.uniform(0, max(sky_floor, 1)),
+                    "y0": rng.uniform(0, max(sky_floor, 1)),
                     "t": tier,
                     "r": (1.05, 1.45, 1.9)[tier],
                     "a": (0.55, 0.75, 0.95)[tier],
@@ -419,11 +496,16 @@ class StarfieldBackground(QWidget):
                     "ph": rng.uniform(0.0, math.tau),
                     "tw": rng.uniform(0.7, 1.6),  # twinkle rate
                     "x": 0.0,
+                    "y": 0.0,
                 }
             )
         self._rects = [QRect() for _ in self._live]
 
     # -- the baked scene ----------------------------------------------------
+    def _ensure_sky(self) -> None:
+        if self._sky is None or self._sky.isNull() or self._frost is None:
+            self._render_sky()
+
     def _render_sky(self) -> None:
         dpr = self.devicePixelRatioF() or 1.0
         width, height = max(self.width(), 1), max(self.height(), 1)
@@ -433,56 +515,47 @@ class StarfieldBackground(QWidget):
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.scale(dpr, dpr)  # draw in logical coordinates throughout
-        rng = random.Random(self._seed)
         rect = QRectF(0, 0, width, height)
 
-        # 1. deep space gradient
-        sky = QLinearGradient(0, 0, width * 0.25, height)
-        sky.setColorAt(0.0, QColor(BG_TOP))
-        sky.setColorAt(0.55, QColor(BG_MID))
-        sky.setColorAt(1.0, QColor(BG_BOTTOM))
-        painter.fillRect(rect, QBrush(sky))
+        # 1. Hanoon's grey gradient
+        base = QLinearGradient(0, 0, width, height * 0.35)
+        base.setColorAt(0.0, QColor(BG_TOP))
+        base.setColorAt(0.55, QColor(BG_MID))
+        base.setColorAt(1.0, QColor(BG_BOTTOM))
+        painter.fillRect(rect, QBrush(base))
 
-        # 2. soft nebula blooms
-        for cx, cy, radius, token, alpha in (
-            (0.16, 0.14, 0.85, NEBULA_A, 0.15),
-            (0.70, 0.40, 0.90, NEBULA_B, 0.12),
-        ):
-            bloom = QRadialGradient(
-                QPointF(width * cx, height * cy), max(width, height) * radius * 0.55
-            )
-            bloom.setColorAt(0.0, tint(token, alpha))
-            bloom.setColorAt(1.0, tint(token, 0.0))
-            painter.fillRect(rect, QBrush(bloom))
+        # 2. the plexus network, leaving room for the rover figure
+        rover_box = self._rover_box(width, height)
+        self._paint_plexus(painter, width, height, rover_box.adjusted(-24, -24, 24, 24))
 
-        # 3. baked star layers
-        megapixels = (width * height) / 1_000_000.0
-        painter.setPen(Qt.PenStyle.NoPen)
-        for count_per_mp, radius, alpha in self.BAKED_LAYERS:
-            for _ in range(int(count_per_mp * max(megapixels, 0.25))):
-                x = rng.uniform(0, width)
-                y = rng.uniform(0, height)
-                jitter = rng.uniform(0.75, 1.3)
-                painter.setBrush(QBrush(tint(INK, alpha * rng.uniform(0.5, 1.0))))
-                painter.drawEllipse(QPointF(x, y), radius * jitter, radius * jitter)
+        # 3. the easter egg: a constellation shaped like the rover
+        self._paint_rover_constellation(painter, rover_box)
 
-        # 4. Earth, its parking orbit, and the trajectory down to the surface
-        earth_center, earth_radius = self._paint_earth(painter, width, height)
-        self._paint_trajectory(painter, width, height, earth_center, earth_radius)
+        # 4. Earth, once it has finished rising
+        self._render_earth_sprite(dpr, width, height)
+        if self._earth_baked and self._earth_sprite is not None:
+            center, _ = self._earth_geometry(1.0, width, height)
+            half = self._earth_sprite.width() / dpr / 2.0
+            painter.drawPixmap(QPointF(center.x() - half, center.y() - half), self._earth_sprite)
 
-        # 5. the lunar horizon, drawn last so it occludes stars behind it
-        self._paint_horizon(painter, width, height, rng)
+        # 5. the lunar horizon, drawn last so it occludes everything behind it
+        self._paint_horizon(painter, width, height, random.Random(self._seed))
 
         # 6. vignette to settle the edges
-        vignette = QRadialGradient(
-            QPointF(width * 0.5, height * 0.42), max(width, height) * 0.80
-        )
+        vignette = QRadialGradient(QPointF(width * 0.5, height * 0.42), max(width, height) * 0.80)
         vignette.setColorAt(0.0, tint("#000000", 0.0))
         vignette.setColorAt(0.62, tint("#000000", 0.08))
         vignette.setColorAt(1.0, tint("#000000", 0.40))
         painter.fillRect(rect, QBrush(vignette))
-
         painter.end()
+
+        center, radius = self._horizon(width, height)
+        moon = QPainterPath()
+        moon.addEllipse(center, radius, radius)
+        open_sky = QPainterPath()
+        open_sky.addRect(rect)
+        self._sky_path = open_sky.subtracted(moon)
+
         self._sky = pixmap
         self._sky_dpr = dpr
         self._frost = self._blur(pixmap)
@@ -500,10 +573,186 @@ class StarfieldBackground(QWidget):
                            ignore, smooth)
         return tiny.scaled(width, height, ignore, smooth)
 
-    def _paint_earth(self, painter: QPainter, width: int, height: int) -> tuple[QPointF, float]:
-        """Earth as a lit crescent with a thin atmospheric halo."""
-        center = QPointF(width * 0.80, height * 0.19)
-        radius = max(13.0, min(width, height) * 0.036)
+    @staticmethod
+    def _paint_plexus(painter: QPainter, width: int, height: int, keep_clear: QRectF) -> None:
+        """Hanoon's dot network: a jittered grid with gaps, each dot joined to its
+        nearest neighbours by thin lines. Seeded, so it is stable between runs."""
+        rng = random.Random(PLEXUS_SEED)
+        cols, rows = 12, 8
+        points = []
+        for row in range(rows):
+            for col in range(cols):
+                if rng.random() < 0.18:
+                    continue
+                nx = (col + 0.1 + rng.random() * 0.8) / cols
+                ny = (row + 0.1 + rng.random() * 0.8) / rows
+                brightness = rng.random()
+                point = (nx * width, ny * height, brightness)
+                if not keep_clear.contains(QPointF(point[0], point[1])):
+                    points.append(point)
+        if not points:
+            return
+
+        spacing = math.sqrt(width * height / len(points))
+        limit = spacing * 1.55
+        links = {}
+        for i, (x1, y1, _) in enumerate(points):
+            nearest = sorted(
+                ((x1 - x2) ** 2 + (y1 - y2) ** 2, j)
+                for j, (x2, y2, _) in enumerate(points)
+                if j != i
+            )[:3]
+            for dist_sq, j in nearest:
+                if dist_sq <= limit * limit:
+                    links[(min(i, j), max(i, j))] = math.sqrt(dist_sq)
+
+        for (i, j), dist in links.items():
+            closeness = 1.0 - dist / limit
+            painter.setPen(QPen(QColor(255, 255, 255, int(24 + 60 * closeness)), 0.8))
+            painter.drawLine(QPointF(points[i][0], points[i][1]), QPointF(points[j][0], points[j][1]))
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        for x, y, brightness in points:
+            painter.setBrush(QBrush(QColor(255, 255, 255, int(150 + 100 * brightness))))
+            radius = 1.0 + brightness * 1.1
+            painter.drawEllipse(QPointF(x, y), radius, radius)
+
+    @staticmethod
+    def _paint_rover_constellation(painter: QPainter, box: QRectF) -> None:
+        """One figure that means something: the rover, drawn in stars."""
+        def at(name: str) -> QPointF:
+            nx, ny = ROVER_STARS[name]
+            return QPointF(box.left() + nx * box.width(), box.top() + ny * box.width())
+
+        line = QPen(tint(MOONLIGHT, 0.30), 1.0)
+        line.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(line)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for a, b in ROVER_LINES:
+            painter.drawLine(at(a), at(b))
+
+        # wheels as faint rings around their stars
+        wheel_radius = box.width() * 0.06
+        painter.setPen(QPen(tint(MOONLIGHT, 0.22), 1.0))
+        for name in ROVER_WHEELS:
+            painter.drawEllipse(at(name), wheel_radius, wheel_radius)
+        # a small dish on the antenna
+        dish = at("ant_top")
+        painter.drawArc(QRectF(dish.x() - 7, dish.y() - 9, 14, 10), 200 * 16, 140 * 16)
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        for name in ROVER_STARS:
+            point = at(name)
+            bright = name in ("mast_top", "wheel_2", "nose")
+            painter.setBrush(QBrush(tint(MOONLIGHT, 0.16)))
+            painter.drawEllipse(point, 4.2 if bright else 3.2, 4.2 if bright else 3.2)
+            painter.setBrush(QBrush(tint(INK, 0.95 if bright else 0.80)))
+            painter.drawEllipse(point, 1.9 if bright else 1.4, 1.9 if bright else 1.4)
+
+    def _paint_horizon(self, painter: QPainter, width: int, height: int,
+                       rng: random.Random) -> None:
+        """The lunar limb: dark, low-contrast regolith with maria, grain and a
+        few faint foreshortened craters, and earthshine catching the edge."""
+        center, radius = self._horizon(width, height)
+        crown = height * (1.0 - HORIZON)
+        surface = QPainterPath()
+        surface.addEllipse(center, radius, radius)
+
+        ground = QLinearGradient(0, crown, 0, height)
+        ground.setColorAt(0.0, QColor(REGOLITH_LIT))
+        ground.setColorAt(0.40, QColor(REGOLITH_MID))
+        ground.setColorAt(1.0, QColor(REGOLITH_DARK))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(ground))
+        painter.drawPath(surface)
+
+        painter.save()
+        painter.setClipPath(surface)
+
+        # maria and highlands: broad soft patches, squashed by perspective
+        for _ in range(26):
+            x = rng.uniform(-0.05, 1.05) * width
+            top = self._horizon_y(x, width, height)
+            y = rng.uniform(top, height)
+            rx = rng.uniform(0.05, 0.16) * width
+            squash = rng.uniform(0.14, 0.28)
+            dark = rng.random() < 0.6
+            patch = QRadialGradient(QPointF(0, 0), rx)
+            token, alpha = ("#000000", rng.uniform(0.10, 0.22)) if dark else (INK, rng.uniform(0.018, 0.04))
+            patch.setColorAt(0.0, tint(token, alpha))
+            patch.setColorAt(1.0, tint(token, 0.0))
+            painter.save()
+            painter.translate(x, y)
+            painter.scale(1.0, squash)
+            painter.setBrush(QBrush(patch))
+            painter.drawEllipse(QPointF(0, 0), rx, rx)
+            painter.restore()
+
+        # fine regolith grain
+        for _ in range(int(width * 0.9)):
+            x = rng.uniform(0, width)
+            y = rng.uniform(self._horizon_y(x, width, height), height)
+            painter.setBrush(QBrush(tint(INK if rng.random() < 0.55 else "#000000",
+                                         rng.uniform(0.015, 0.05))))
+            dot = rng.uniform(0.5, 0.9)
+            painter.drawEllipse(QPointF(x, y), dot, dot)
+
+        # a few faint craters: shadowed bowl, lit far wall, dark near lip
+        for _ in range(9):
+            x = rng.uniform(0.04, 0.96) * width
+            top = self._horizon_y(x, width, height)
+            depth = rng.uniform(0.08, 1.0)
+            y = top + 6 + depth * (height - top) * 0.78
+            rx = 4 + depth * rng.uniform(12, 30)
+            ry = rx * (0.20 + 0.14 * depth)
+            bowl = QRadialGradient(QPointF(x + rx * 0.15, y - ry * 0.25), rx)
+            bowl.setColorAt(0.0, tint("#000000", 0.24))
+            bowl.setColorAt(1.0, tint("#000000", 0.03))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(bowl))
+            painter.drawEllipse(QPointF(x, y), rx, ry)
+            box = QRectF(x - rx, y - ry, rx * 2, ry * 2)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(tint(INK, 0.08), 1.0))
+            painter.drawArc(box, 200 * 16, 140 * 16)   # far wall catches the light
+            painter.setPen(QPen(tint("#000000", 0.20), 1.0))
+            painter.drawArc(box, 20 * 16, 140 * 16)    # near lip in shadow
+        painter.restore()
+
+        # earthshine catching the limb, brightest under Earth
+        rim = QLinearGradient(0, 0, width, 0)
+        rim.setColorAt(0.0, tint(MOONLIGHT, 0.04))
+        rim.setColorAt(0.80, tint(MOONLIGHT, 0.30))
+        rim.setColorAt(1.0, tint(MOONLIGHT, 0.12))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QBrush(rim), 1.2))
+        painter.drawPath(surface)
+        painter.setPen(QPen(QBrush(rim), 7.0))
+        painter.setOpacity(0.10)
+        painter.drawPath(surface)
+        painter.setOpacity(1.0)
+
+    # -- Earth ----------------------------------------------------------------
+    def _earth_geometry(self, progress: float, width: float, height: float) -> tuple[QPointF, float]:
+        """Earth climbs from below the limb to just above it."""
+        radius = max(13.0, min(width, height) * 0.034)
+        x = width * 0.80
+        horizon = self._horizon_y(x, width, height)
+        start = horizon + radius * 1.4
+        rest = horizon - radius * 2.8
+        return QPointF(x, start + (rest - start) * smoothstep(progress)), radius
+
+    def _render_earth_sprite(self, dpr: float, width: int, height: int) -> None:
+        """Earth as a lit crescent with a thin atmospheric halo, pre-rendered."""
+        _, radius = self._earth_geometry(0.0, width, height)
+        half = radius * 4.2 + 2.0
+        side = int(math.ceil(half * 2))
+        sprite = QPixmap(int(math.ceil(side * dpr)), int(math.ceil(side * dpr)))
+        sprite.setDevicePixelRatio(dpr)
+        sprite.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(sprite)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        center = QPointF(side / 2.0, side / 2.0)
 
         glow = QRadialGradient(center, radius * 4.2)
         glow.setColorAt(0.0, tint(ACCENT_LIGHT, 0.13))
@@ -517,119 +766,42 @@ class StarfieldBackground(QWidget):
         disc.addEllipse(center, radius, radius)
         painter.setBrush(QBrush(QColor(EARTH_NIGHT)))
         painter.drawPath(disc)
-
         # sunlight from the upper right; the night side faces the moon
         shadow = QPainterPath()
         shadow.addEllipse(QPointF(center.x() - radius * 0.52, center.y() + radius * 0.34),
                           radius * 1.02, radius * 1.02)
-        lit = disc.subtracted(shadow)
         day = QLinearGradient(center.x() + radius, center.y() - radius, center.x(), center.y())
         day.setColorAt(0.0, QColor(EARTH_DAY))
         day.setColorAt(1.0, QColor(EARTH_SEA))
         painter.setBrush(QBrush(day))
-        painter.drawPath(lit)
-
+        painter.drawPath(disc.subtracted(shadow))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(tint(ACCENT_LIGHT, 0.30), 1.0))
         painter.drawPath(disc)
+        painter.end()
+        self._earth_sprite = sprite
 
-        margin = int(radius * 1.6)
-        self._earth_rect = QRect(int(center.x()) - margin, int(center.y()) - margin,
-                                 margin * 2, margin * 2)
-        return center, radius
-
-    def _paint_trajectory(self, painter: QPainter, width: int, height: int,
-                          earth: QPointF, earth_radius: float) -> None:
-        """Parking orbit around Earth plus a dashed transfer arc to the surface."""
-        painter.save()
-        orbit = QPainterPath()
-        orbit.addEllipse(QPointF(0, 0), earth_radius * 3.1, earth_radius * 1.05)
-        painter.setTransform(QTransform().translate(earth.x(), earth.y()).rotate(-18), True)
-        orbit_pen = QPen(tint(INK, 0.11), 1.0)
-        orbit_pen.setCosmetic(True)
-        painter.setPen(orbit_pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawPath(orbit)
-        painter.restore()
-
-        landing_x = width * 0.24
-        start = QPointF(earth.x() - earth_radius * 2.6, earth.y() + earth_radius * 1.0)
-        end = QPointF(landing_x, self._horizon_y(landing_x, width, height) - 3)
-        transfer = QPainterPath(start)
-        transfer.cubicTo(QPointF(width * 0.60, height * 0.20),
-                         QPointF(width * 0.34, height * 0.36), end)
-        dashed = QPen(tint(INK, 0.16), 1.0)
-        dashed.setCosmetic(True)
-        dashed.setDashPattern([5.0, 7.0])
-        painter.setPen(dashed)
-        painter.drawPath(transfer)
-
-        craft = transfer.pointAtPercent(0.38)
-        halo = QRadialGradient(craft, 9.0)
-        halo.setColorAt(0.0, tint(ACCENT_LIGHT, 0.40))
-        halo.setColorAt(1.0, tint(ACCENT_LIGHT, 0.0))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(halo))
-        painter.drawEllipse(craft, 9.0, 9.0)
-        painter.setBrush(QBrush(tint(INK, 0.95)))
-        painter.drawEllipse(craft, 1.8, 1.8)
-
-    def _paint_horizon(self, painter: QPainter, width: int, height: int,
-                       rng: random.Random) -> None:
-        """The lunar limb: dark regolith, an earthshine rim, foreshortened craters."""
-        center, radius = self._horizon(width, height)
-        crown = height * (1.0 - HORIZON)
-        surface = QPainterPath()
-        surface.addEllipse(center, radius, radius)
-
-        ground = QLinearGradient(0, crown, 0, height)
-        ground.setColorAt(0.0, QColor(REGOLITH_LIT))
-        ground.setColorAt(0.35, QColor("#151821"))
-        ground.setColorAt(1.0, QColor(REGOLITH_DARK))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(ground))
-        painter.drawPath(surface)
-
-        painter.save()
-        painter.setClipPath(surface)
-        # fine regolith grain
-        for _ in range(int(width * 0.35)):
-            x = rng.uniform(0, width)
-            y = rng.uniform(self._horizon_y(x, width, height), height)
-            painter.setBrush(QBrush(tint(INK, rng.uniform(0.02, 0.06))))
-            painter.drawEllipse(QPointF(x, y), 0.7, 0.7)
-        # craters squashed by perspective, larger towards the viewer
-        for _ in range(11):
-            x = rng.uniform(0.04, 0.96) * width
-            top = self._horizon_y(x, width, height)
-            depth = rng.uniform(0.08, 1.0)
-            y = top + 6 + depth * (height - top) * 0.75
-            rx = 5 + depth * rng.uniform(14, 34)
-            ry = rx * (0.22 + 0.10 * depth)
-            # shallow bowl: soft shadowed floor, sunlit far wall
-            bowl = QRadialGradient(QPointF(x, y - ry * 0.3), rx)
-            bowl.setColorAt(0.0, tint("#000000", 0.24))
-            bowl.setColorAt(1.0, tint("#000000", 0.04))
-            painter.setBrush(QBrush(bowl))
-            painter.drawEllipse(QPointF(x, y), rx, ry)
-            painter.setPen(QPen(tint(INK, 0.10), 1.0))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawArc(QRectF(x - rx, y - ry, rx * 2, ry * 2), 200 * 16, 140 * 16)
-            painter.setPen(Qt.PenStyle.NoPen)
-        painter.restore()
-
-        # earthshine catching the limb, brightest under Earth
-        rim = QLinearGradient(0, 0, width, 0)
-        rim.setColorAt(0.0, tint(MOONLIGHT, 0.04))
-        rim.setColorAt(0.70, tint(MOONLIGHT, 0.34))
-        rim.setColorAt(1.0, tint(MOONLIGHT, 0.12))
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QBrush(rim), 1.2))
-        painter.drawPath(surface)
-        painter.setPen(QPen(QBrush(rim), 7.0))
-        painter.setOpacity(0.10)
-        painter.drawPath(surface)
-        painter.setOpacity(1.0)
+    def _advance_earthrise(self, elapsed: float, width: int, height: int) -> None:
+        if self._earth_baked or self._earth_sprite is None:
+            return
+        progress = (elapsed - EARTHRISE_DELAY) / EARTHRISE_SECONDS
+        if progress >= 1.0:
+            # Settled: bake Earth into the sky (and the frost the glass samples),
+            # then it costs nothing per frame.
+            self._earth_baked = True
+            self._render_sky()
+            self.update()
+            return
+        center, radius = self._earth_geometry(max(progress, 0.0), width, height)
+        half = int(math.ceil(self._earth_sprite.width() / self._sky_dpr / 2.0))
+        rect = QRect(int(center.x()) - half, int(center.y()) - half, half * 2, half * 2)
+        if rect == self._earth_rect:
+            return
+        dirty = rect if self._earth_rect.isNull() else rect.united(self._earth_rect)
+        self._earth_rect = rect
+        disc = int(radius * 1.2) + 2
+        self._earth_disc = QRect(int(center.x()) - disc, int(center.y()) - disc, disc * 2, disc * 2)
+        self.update(dirty)
 
     def _render_sprites(self, dpr: float) -> None:
         """One halo+core sprite per star tier; twinkle is just paint opacity."""
@@ -654,6 +826,7 @@ class StarfieldBackground(QWidget):
     # -- frosted backdrop for glass ------------------------------------------
     def paint_frost(self, painter: QPainter, source: QRect, target: QRectF) -> bool:
         """Draw the blurred scene under `source` (our coordinates) into `target`."""
+        self._ensure_sky()
         if self._frost is None:
             return False
         dpr = self._sky_dpr
@@ -663,18 +836,30 @@ class StarfieldBackground(QWidget):
         return True
 
     # -- per-frame ----------------------------------------------------------
+    def _update_parallax(self, width: int, height: int) -> None:
+        """Ease the star layers toward an offset opposite the mouse pointer."""
+        cursor = self.mapFromGlobal(QCursor.pos())
+        tx = max(-1.0, min(1.0, cursor.x() / max(width, 1) * 2.0 - 1.0))
+        ty = max(-1.0, min(1.0, cursor.y() / max(height, 1) * 2.0 - 1.0))
+        px, py = self._parallax.x(), self._parallax.y()
+        self._parallax = QPointF(px + (-tx - px) * 0.10, py + (-ty - py) * 0.10)
+
     def _tick(self) -> None:
         if not self.isVisible() or self.width() <= 0:
             return
         window = self.window()
         if window is not None and window.isMinimized():
             return
+        if self._sky is None:
+            return  # first paint has not happened yet
 
         elapsed = time.monotonic() - self._t0
         self._phase = elapsed
-        width = self.width()
+        width, height = self.width(), self.height()
+        self._update_parallax(width, height)
+        self._advance_earthrise(elapsed, width, height)
 
-        # Card geometry only changes on resize or page switch, and stars drift a
+        # Card geometry only changes on resize or page switch, and stars move a
         # few px per second, so which stars sit behind glass is re-decided twice
         # a second rather than tested every frame.
         recheck = self._covered_age <= 0
@@ -683,8 +868,12 @@ class StarfieldBackground(QWidget):
             self._covered_age = 15
         self._covered_age -= 1
 
+        shift_x = self._parallax.x() * PARALLAX_PX
+        shift_y = self._parallax.y() * PARALLAX_PX * 0.6
         for index, star in enumerate(self._live):
-            star["x"] = (star["x0"] + star["vx"] * elapsed) % width
+            depth = self.STAR_DEPTH[star["t"]]
+            star["x"] = (star["x0"] + star["vx"] * elapsed) % width + shift_x * depth
+            star["y"] = star["y0"] + shift_y * depth
             new_rect = self._star_rect(star)
             old_rect = self._rects[index]
             self._rects[index] = new_rect
@@ -714,8 +903,7 @@ class StarfieldBackground(QWidget):
         )
 
     def paintEvent(self, event):
-        if self._sky is None or self._sky.isNull():
-            self._render_sky()
+        self._ensure_sky()
 
         # Qt clips the painter to the damaged region, so blitting its bounding
         # rect only writes the pixels that actually changed.
@@ -724,10 +912,18 @@ class StarfieldBackground(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self._blit_sky(painter, damaged)
-        earth = self._earth_rect
+
+        if not self._earth_baked and self._earth_sprite is not None \
+                and not self._earth_rect.isNull() and region.intersects(self._earth_rect):
+            painter.save()
+            painter.setClipPath(self._sky_path)  # Earth rises from behind the limb
+            painter.drawPixmap(QPointF(self._earth_rect.topLeft()), self._earth_sprite)
+            painter.restore()
+
+        earth = self._earth_disc
         for star, rect in zip(self._live, self._rects):
             if rect.isNull():  # not placed by a tick yet
-                rect = self._star_rect(star)
+                continue
             # test the exact region, not its bounding box; never pass in front of Earth
             if region.intersects(rect) and not rect.intersects(earth):
                 self._paint_live_star(painter, star)
@@ -805,7 +1001,11 @@ def paint_liquid_glass(painter: QPainter, widget: QWidget, radius: float) -> Non
 
 
 class GlassCard(QWidget):
-    """Liquid-glass slab with a body layout and optional section header."""
+    """Liquid-glass slab with a body layout and optional section header.
+
+    Like Hanoon's GlassBox it can glow: softly on hover, blue while it is
+    "active" (its camera is live) and red as an alert (an obstacle on radar).
+    """
 
     def __init__(
         self,
@@ -824,12 +1024,63 @@ class GlassCard(QWidget):
         if title:
             self.caption = caption_label(title, self)
             self.body.addWidget(self.caption)
+        self._levels = {"hover": 0.0, "active": 0.0, "alert": 0.0}
+        self._targets: dict[str, float] = {}
+        self._anims: dict[str, QVariantAnimation] = {}
+
+    def _fade(self, name: str, target: float, duration: int) -> None:
+        if self._targets.get(name) == target:
+            return
+        self._targets[name] = target
+        anim = self._anims.get(name)
+        if anim is None:
+            anim = QVariantAnimation(self)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim.valueChanged.connect(lambda value, key=name: self._set_level(key, value))
+            self._anims[name] = anim
+        anim.stop()
+        anim.setDuration(duration)
+        anim.setStartValue(float(self._levels[name]))
+        anim.setEndValue(float(target))
+        anim.start()
+
+    def _set_level(self, name: str, value) -> None:
+        self._levels[name] = float(value)
+        self.update()
+
+    def set_active(self, active: bool) -> None:
+        self._fade("active", 1.0 if active else 0.0, 350)
+
+    def set_alert(self, alert: bool) -> None:
+        self._fade("alert", 1.0 if alert else 0.0, 180)
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._fade("hover", 1.0, 200)
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._fade("hover", 0.0, 320)
 
     def paintEvent(self, event):
         del event
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         paint_liquid_glass(painter, self, self._radius)
+
+        path = rounded_path(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), self._radius)
+        # (level, fill token, fill alpha, rim token, rim alpha, rim width)
+        for level, fill, fill_alpha, rim, rim_alpha, width in (
+            (self._levels["hover"], INK, 0.035, INK, 0.30, 1.2),
+            (self._levels["active"], ACCENT, 0.035, ACCENT, 0.55, 1.4),
+            (self._levels["alert"], BAD, 0.12, BAD, 0.92, 2.0),
+        ):
+            if level <= 0.004:
+                continue
+            painter.fillPath(path, QBrush(tint(fill, fill_alpha * level)))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(tint(rim, rim_alpha * level), width))
+            painter.drawPath(path)
 
 
 class GlassCapsule(QWidget):
@@ -843,6 +1094,87 @@ class GlassCapsule(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# BrandMark -- Hanoon's top-left identity
+# ---------------------------------------------------------------------------
+
+class BrandMark(QWidget):
+    """Glowing blue core in a thin ring, then a letter-spaced MANUS / AD LUNAM.
+
+    Density: 0 = mark only, 1 = mark + wordmark, 2 = + "Command & Control".
+    """
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setFixedHeight(40)
+        self._density = 2
+        self._bold = app_font(14, QFont.Weight.Bold, spacing=3.0)
+        self._light = app_font(14, QFont.Weight.Light, spacing=3.0)
+        self._tag = app_font(12, QFont.Weight.Normal)
+
+    def set_density(self, density: int) -> None:
+        if density != self._density:
+            self._density = density
+            self.updateGeometry()
+            self.update()
+
+    def _widths(self) -> tuple[float, float, float]:
+        return (
+            QFontMetricsF(self._bold).horizontalAdvance("MANUS"),
+            QFontMetricsF(self._light).horizontalAdvance("AD LUNAM"),
+            QFontMetricsF(self._tag).horizontalAdvance("Command & Control"),
+        )
+
+    def sizeHint(self) -> QSize:
+        manus, lunam, tag = self._widths()
+        width = 30.0
+        if self._density >= 1:
+            width += 12 + manus + 10 + lunam
+        if self._density >= 2:
+            width += 18 + tag
+        return QSize(int(math.ceil(width)) + 2, 40)
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        mid = self.height() / 2.0
+
+        center = QPointF(15, mid)
+        glow = QRadialGradient(center, 15)
+        glow.setColorAt(0.0, tint(ACCENT, 0.59))
+        glow.setColorAt(1.0, tint(ACCENT, 0.0))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(glow))
+        painter.drawEllipse(center, 15, 15)
+        painter.setBrush(QBrush(QColor(ACCENT)))
+        painter.drawEllipse(center, 4.5, 4.5)
+        painter.setPen(QPen(tint(INK, 0.35), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(center, 9, 9)
+
+        if self._density < 1:
+            return
+        manus, lunam, _ = self._widths()
+        flags = int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        x = 42.0
+        painter.setFont(self._bold)
+        painter.setPen(QPen(tint(INK, 0.96)))
+        painter.drawText(QRectF(x, 0, manus + 8, self.height()), flags, "MANUS")
+        x += manus + 10
+        painter.setFont(self._light)
+        painter.setPen(QPen(QColor("#C7C7D1")))
+        painter.drawText(QRectF(x, 0, lunam + 8, self.height()), flags, "AD LUNAM")
+        x += lunam
+        if self._density >= 2:
+            x += 9
+            painter.setPen(QPen(tint(INK, 0.16), 1))
+            painter.drawLine(QPointF(x, mid - 9), QPointF(x, mid + 9))
+            painter.setFont(self._tag)
+            painter.setPen(QPen(tint(INK, 0.50)))
+            painter.drawText(QRectF(x + 9, 0, 200, self.height()), flags, "Command & Control")
+
+
+# ---------------------------------------------------------------------------
 # PillButton
 # ---------------------------------------------------------------------------
 
@@ -852,7 +1184,8 @@ class PillButton(QPushButton):
     variant: 'primary' (accent glass), 'secondary' (clear glass + rim),
              'ghost' (plain, for use inside a glass capsule).
     Pass `glyph` for a painted icon; with no text the button is a circle.
-    `set_active(True)` latches an accent tint, for toggles.
+    `set_active(True)` latches an accent tint, for toggles; `set_busy(True)`
+    spins the glyph, for work in progress.
     """
 
     def __init__(
@@ -871,6 +1204,10 @@ class PillButton(QPushButton):
         self._active = False
         self._hover = 0.0
         self._fixed_height = height or (34 if compact else 46)
+        self._spin_angle = 0.0
+        self._spin = QTimer(self)
+        self._spin.setInterval(30)
+        self._spin.timeout.connect(self._advance_spin)
 
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFont(app_font(13 if compact else 15, QFont.Weight.DemiBold))
@@ -898,6 +1235,22 @@ class PillButton(QPushButton):
 
     def is_active(self) -> bool:
         return self._active
+
+    def set_glyph(self, glyph: str | None) -> None:
+        self._glyph = glyph
+        self.update()
+
+    def set_busy(self, busy: bool) -> None:
+        if busy and not self._spin.isActive():
+            self._spin.start()
+        elif not busy and self._spin.isActive():
+            self._spin.stop()
+            self._spin_angle = 0.0
+        self.update()
+
+    def _advance_spin(self) -> None:
+        self._spin_angle = (self._spin_angle + 14.0) % 360.0
+        self.update()
 
     def enterEvent(self, event):
         super().enterEvent(event)
@@ -931,6 +1284,7 @@ class PillButton(QPushButton):
         rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         path = rounded_path(rect, rect.height() / 2.0)
         enabled = self.isEnabled()
+        busy = self._spin.isActive()
         lift = 0.0 if not enabled else (1.0 if self.isDown() else self._hover)
 
         if self._variant == "primary":
@@ -964,6 +1318,8 @@ class PillButton(QPushButton):
             self._paint_sheen(painter, rect, path, 0.10)
             content = tint(INK, (0.90 if enabled else 0.32) + 0.10 * lift)
             rim_strength = 0.30 + 0.12 * lift
+        if busy:
+            content = tint(ACCENT_LIGHT, 1.0)  # stays readable while disabled
 
         if rim_strength:
             rim = QLinearGradient(rect.topLeft(), rect.bottomLeft())
@@ -986,8 +1342,15 @@ class PillButton(QPushButton):
         if self._glyph:
             glyph_rect = QRectF(cursor_x, rect.center().y() - glyph_size / 2.0,
                                 glyph_size, glyph_size)
+            if busy:
+                painter.save()
+                painter.translate(glyph_rect.center())
+                painter.rotate(self._spin_angle)
+                painter.translate(-glyph_rect.center())
             paint_glyph(painter, self._glyph, glyph_rect, content,
                         width=1.6 if self._compact else 1.8)
+            if busy:
+                painter.restore()
             cursor_x += glyph_size + gap
 
         if text:
@@ -1012,7 +1375,7 @@ class PillButton(QPushButton):
 
 
 # ---------------------------------------------------------------------------
-# StatusPill
+# StatusPill / StatusRow
 # ---------------------------------------------------------------------------
 
 class StatusPill(QWidget):
@@ -1059,12 +1422,17 @@ class StatusPill(QWidget):
         return self in StatusPill._pulsing
 
     def set_state(self, state: str, caption: str | None = None) -> None:
+        if state == self._state and (caption is None or caption == self._caption):
+            return
         self._state = state
         if caption is not None:
             self.setText(caption)
         self._sync_timer()
         self.updateGeometry()
         self.update()
+
+    def state(self) -> str:
+        return self._state
 
     def setText(self, caption: str) -> None:
         """Label-style setter, so status writers can treat this like a QLabel."""
@@ -1100,6 +1468,20 @@ class StatusPill(QWidget):
         width = metrics.horizontalAdvance(self._caption) + (30 if self._flat else 42)
         return QSize(max(width, self._min_width), self.height())
 
+    def _paint_dot(self, painter: QPainter, center: QPointF) -> None:
+        color = QColor(state_color(self._state))
+        if self._is_pulsing():
+            pulse = (time.monotonic() / self.PULSE_PERIOD) % 1.0
+            halo = 3.0 + 5.0 * pulse
+            fade = QColor(color)
+            fade.setAlphaF(0.34 * (1.0 - pulse))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(fade))
+            painter.drawEllipse(center, halo, halo)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(color))
+        painter.drawEllipse(center, 3.8, 3.8)
+
     def paintEvent(self, event):
         del event
         painter = QPainter(self)
@@ -1114,19 +1496,8 @@ class StatusPill(QWidget):
             painter.setPen(QPen(tint(INK, 0.12), 1.0))
             painter.drawPath(path)
 
-        color = QColor(state_color(self._state))
         center = QPointF(rect.left() + (8 if self._flat else 15), rect.center().y())
-        if self._is_pulsing():
-            pulse = (time.monotonic() / self.PULSE_PERIOD) % 1.0
-            halo = 3.0 + 5.0 * pulse
-            painter.setPen(Qt.PenStyle.NoPen)
-            fade = QColor(color)
-            fade.setAlphaF(0.34 * (1.0 - pulse))
-            painter.setBrush(QBrush(fade))
-            painter.drawEllipse(center, halo, halo)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(color))
-        painter.drawEllipse(center, 3.8, 3.8)
+        self._paint_dot(painter, center)
 
         left = center.x() + 11
         painter.setPen(QPen(tint(INK, 0.88)))
@@ -1145,6 +1516,44 @@ class StatusPill(QWidget):
         )
 
 
+class StatusRow(StatusPill):
+    """One line of a status list: dot, name on the left, value on the right."""
+
+    def __init__(self, name: str, value: str = "", state: str = "idle",
+                 parent: QWidget | None = None):
+        super().__init__(value, state, parent, flat=True)
+        self._name = name
+        self.setFixedHeight(26)
+        self._name_font = app_font(13, QFont.Weight.Medium)
+
+    def sizeHint(self) -> QSize:
+        return QSize(180, self.height())
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = QRectF(self.rect())
+        self._paint_dot(painter, QPointF(rect.left() + 6, rect.center().y()))
+        flags_left = int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        flags_right = int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+
+        painter.setFont(self._name_font)
+        painter.setPen(QPen(tint(INK, 0.60)))
+        name_width = QFontMetrics(self._name_font).horizontalAdvance(self._name)
+        painter.drawText(QRectF(rect.left() + 18, rect.top(), name_width + 4, rect.height()),
+                         flags_left, self._name)
+
+        painter.setFont(self.font())
+        painter.setPen(QPen(tint(INK, 0.92)))
+        value_left = rect.left() + 18 + name_width + 10
+        value = QFontMetrics(self.font()).elidedText(
+            self._caption, Qt.TextElideMode.ElideRight, int(rect.right() - value_left)
+        )
+        painter.drawText(QRectF(value_left, rect.top(), rect.right() - value_left, rect.height()),
+                         flags_right, value)
+
+
 # ---------------------------------------------------------------------------
 # VideoSurface
 # ---------------------------------------------------------------------------
@@ -1153,7 +1562,8 @@ class VideoSurface(QLabel):
     """QLabel that paints its pixmap letterboxed inside a rounded frame.
 
     Stays a QLabel so the existing `setPixmap` / `size()` feed code is unchanged.
-    Emits `clicked` on a left click, used to swap the hero and inset feeds.
+    Emits `clicked` on a left click (used to swap hero and inset) and can show
+    a status chip over the picture (used in fullscreen).
     """
 
     clicked = pyqtSignal()
@@ -1163,6 +1573,7 @@ class VideoSurface(QLabel):
         super().__init__(parent)
         self._placeholder = placeholder
         self._radius = radius
+        self._overlay: tuple[str, str] | None = None
         self.setMinimumSize(160, 90)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setFont(app_font(13, QFont.Weight.Medium))
@@ -1170,6 +1581,12 @@ class VideoSurface(QLabel):
     def set_placeholder(self, text: str) -> None:
         self._placeholder = text
         self.update()
+
+    def set_overlay(self, text: str | None, color: str | None = None) -> None:
+        overlay = (text, color or INK) if text else None
+        if overlay != self._overlay:
+            self._overlay = overlay
+            self.update()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.pos()):
@@ -1207,11 +1624,33 @@ class VideoSurface(QLabel):
                 int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap),
                 self._placeholder,
             )
+        if self._overlay:
+            self._paint_overlay(painter, rect)
         painter.setClipping(False)
 
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setPen(QPen(tint(INK, 0.10), 1.0))
         painter.drawPath(path)
+
+    def _paint_overlay(self, painter: QPainter, rect: QRectF) -> None:
+        text, color = self._overlay
+        font = app_font(15, QFont.Weight.DemiBold)
+        painter.setFont(font)
+        width = QFontMetrics(font).horizontalAdvance(text) + 50
+        height = 38.0
+        chip = QRectF(rect.left() + 18, rect.top() + 18, width, height)
+        painter.setPen(QPen(tint(INK, 0.22), 1))
+        painter.setBrush(QBrush(tint("#000000", 0.58)))
+        painter.drawRoundedRect(chip, height / 2, height / 2)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(color)))
+        painter.drawEllipse(QPointF(chip.left() + 19, chip.center().y()), 5.0, 5.0)
+        painter.setPen(QPen(tint(INK, 0.96)))
+        painter.drawText(
+            QRectF(chip.left() + 33, chip.top(), width - 38, height),
+            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+            text,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1323,8 +1762,8 @@ class NumeralLabel(QWidget):
 
     "72%" renders as a large "72" with a small "%"; "FL" renders as-is. The
     widget is only as tall as the cap height, so big numbers do not drag the
-    font's empty ascent and descent space into the layout.
-    Label-compatible: setText() / text().
+    font's empty ascent and descent space into the layout. Colour changes
+    cross-fade, like Hanoon's payload tile. Label-compatible: setText() / text().
     """
 
     def __init__(self, text: str = "", size: int = 60, color: str = INK,
@@ -1337,6 +1776,10 @@ class NumeralLabel(QWidget):
         cap = QFontMetricsF(self._font).capHeight()
         self.setFixedHeight(int(math.ceil(cap)) + 4)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(220)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_color)
 
     def setText(self, text: str) -> None:
         self._text = str(text)
@@ -1347,7 +1790,16 @@ class NumeralLabel(QWidget):
         return self._text
 
     def set_color(self, hex_color: str, alpha: float = 0.96) -> None:
-        self._color = tint(hex_color, alpha)
+        target = tint(hex_color, alpha)
+        if target == self._color:
+            return
+        self._anim.stop()
+        self._anim.setStartValue(QColor(self._color))
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def _on_color(self, value) -> None:
+        self._color = QColor(value)
         self.update()
 
     def _split(self) -> tuple[str, str]:
@@ -1385,12 +1837,92 @@ class NumeralLabel(QWidget):
             painter.drawText(QPointF(x, baseline), unit)
 
 
+class CommandLabel(NumeralLabel):
+    """Bold, glowing drive-command letters ("S", "FL", ...).
+
+    The letters are filled with a top-lit gradient in the command colour and
+    sit in a soft bloom with a layered halo, so the active command reads at a
+    glance. Same API as NumeralLabel: setText(), text(), set_color() (which
+    cross-fades). It only repaints when the command changes.
+    """
+
+    GLOW_PAD = 14  # room around the letters for the halo
+
+    def __init__(self, text: str = "", size: int = 58, color: str = INK,
+                 alpha: float = 1.0, parent: QWidget | None = None):
+        super().__init__(text, size, color, alpha, parent)
+        font = QFont()
+        font.setFamilies(COMMAND_FAMILIES)
+        font.setPixelSize(size)
+        font.setWeight(QFont.Weight.Bold)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.5)
+        self._font = font
+        cap = QFontMetricsF(font).capHeight()
+        self.setFixedHeight(int(math.ceil(cap)) + 2 * self.GLOW_PAD)
+
+    def sizeHint(self) -> QSize:
+        width = QFontMetricsF(self._font).horizontalAdvance(self._text)
+        return QSize(int(math.ceil(width)) + 2 * self.GLOW_PAD, self.height())
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        color = QColor(self._color)
+        baseline = self.height() - self.GLOW_PAD
+        path = QPainterPath()
+        # Winding fill: variable fonts such as Bahnschrift build stems from
+        # overlapping contours, which the default odd-even rule punches holes in.
+        path.setFillRule(Qt.FillRule.WindingFill)
+        path.addText(QPointF(self.GLOW_PAD, baseline), self._font, self._text)
+        bounds = path.boundingRect()
+
+        # soft bloom behind the letters: an ellipse that fades to nothing inside
+        # the widget, so it never shows a hard clipped edge
+        rect = QRectF(self.rect())
+        center = bounds.center()
+        # centred on the letters, and no larger than the room the widget has
+        rx = min(center.x() - rect.left(), rect.right() - center.x())
+        ry = min(center.y() - rect.top(), rect.bottom() - center.y())
+        bloom = QRadialGradient(QPointF(0, 0), 1.0)
+        bloom_in = QColor(color)
+        bloom_in.setAlphaF(0.24)
+        bloom_out = QColor(color)
+        bloom_out.setAlphaF(0.0)
+        bloom.setColorAt(0.0, bloom_in)
+        bloom.setColorAt(1.0, bloom_out)
+        painter.save()
+        painter.translate(center)
+        painter.scale(rx, ry)
+        painter.fillRect(QRectF(-1, -1, 2, 2), QBrush(bloom))
+        painter.restore()
+
+        # layered halo: wide and faint to tight and bright, a cheap blur
+        for width, alpha in ((14.0, 0.07), (9.0, 0.12), (5.0, 0.22), (2.4, 0.40)):
+            halo = QColor(color)
+            halo.setAlphaF(alpha)
+            pen = QPen(halo, width)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.strokePath(path, pen)
+
+        # letters: lit from above, settling into the command colour
+        fill = QLinearGradient(bounds.topLeft(), bounds.bottomLeft())
+        fill.setColorAt(0.0, color.lighter(165))
+        fill.setColorAt(0.55, color.lighter(118))
+        fill.setColorAt(1.0, color)
+        painter.fillPath(path, QBrush(fill))
+
+
 # ---------------------------------------------------------------------------
 # KeyCaps
 # ---------------------------------------------------------------------------
 
 class KeyCaps(QWidget):
-    """W / A S D key caps that press down and light up while held."""
+    """W / A S D key caps that press down and light up while held.
+
+    The lit colour follows the drive command (Hanoon's keyboard payload).
+    """
 
     ROWS = (("W",), ("A", "S", "D"))
     CAP = 32
@@ -1406,10 +1938,15 @@ class KeyCaps(QWidget):
         keys = [key for row in self.ROWS for key in row]
         self._target = dict.fromkeys(keys, 0.0)
         self._level = dict.fromkeys(keys, 0.0)
+        self._lit = QColor(ACCENT)
         self._font = app_font(13, QFont.Weight.DemiBold)
         self._timer = QTimer(self)
         self._timer.setInterval(self.FRAME_MS)
         self._timer.timeout.connect(self._animate)
+
+    def set_color(self, hex_color: str) -> None:
+        self._lit = QColor(hex_color)
+        self.update()
 
     def set_pressed(self, letters) -> None:
         """Light exactly these keys, e.g. {'W', 'A'}."""
@@ -1436,12 +1973,8 @@ class KeyCaps(QWidget):
 
     def _cap_rect(self, row: int, col: int) -> QRectF:
         step = self.CAP + self.GAP
-        if row == 0:
-            x = 1 + step  # W sits above S
-        else:
-            x = 1 + col * step
-        y = 1 + row * step
-        return QRectF(x, y, self.CAP, self.CAP)
+        x = 1 + step if row == 0 else 1 + col * step  # W sits above S
+        return QRectF(x, 1 + row * step, self.CAP, self.CAP)
 
     def paintEvent(self, event):
         del event
@@ -1454,24 +1987,25 @@ class KeyCaps(QWidget):
                 base = self._cap_rect(row, col)
 
                 # key side, visible below an un-pressed cap
-                side = base.translated(0, self.DEPTH)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(QBrush(tint("#000000", 0.45)))
-                painter.drawRoundedRect(side, radius, radius)
+                painter.drawRoundedRect(base.translated(0, self.DEPTH), radius, radius)
 
                 face = base.translated(0, self.DEPTH * level)
                 if level > 0.01:
                     glow = QRadialGradient(face.center(), self.CAP * 0.95)
-                    glow.setColorAt(0.0, tint(ACCENT_LIGHT, 0.32 * level))
-                    glow.setColorAt(1.0, tint(ACCENT_LIGHT, 0.0))
+                    glow_in = QColor(self._lit)
+                    glow_in.setAlphaF(0.32 * level)
+                    glow_out = QColor(self._lit)
+                    glow_out.setAlphaF(0.0)
+                    glow.setColorAt(0.0, glow_in)
+                    glow.setColorAt(1.0, glow_out)
                     painter.setBrush(QBrush(glow))
                     painter.drawEllipse(face.center(), self.CAP * 0.95, self.CAP * 0.95)
 
                 fill = QLinearGradient(face.topLeft(), face.bottomLeft())
-                idle_top, idle_bottom = tint(INK, 0.14), tint(INK, 0.07)
-                lit_top, lit_bottom = QColor(ACCENT).lighter(118), QColor(ACCENT)
-                fill.setColorAt(0.0, self._mix(idle_top, lit_top, level))
-                fill.setColorAt(1.0, self._mix(idle_bottom, lit_bottom, level))
+                fill.setColorAt(0.0, self._mix(tint(INK, 0.14), self._lit.lighter(118), level))
+                fill.setColorAt(1.0, self._mix(tint(INK, 0.07), self._lit, level))
                 painter.setBrush(QBrush(fill))
                 painter.drawRoundedRect(face, radius, radius)
 
@@ -1508,9 +2042,11 @@ class DirectionIndicator(QWidget):
         super().__init__(parent)
         self.setFixedSize(76, 76)
         self._command = "S"
+        self._color = QColor(CMD_STOP)
 
-    def set_command(self, command: str) -> None:
+    def set_command(self, command: str, color: str | None = None) -> None:
         self._command = (command or "S").upper()
+        self._color = QColor(color or command_color(self._command))
         self.update()
 
     def paintEvent(self, event):
@@ -1526,7 +2062,6 @@ class DirectionIndicator(QWidget):
         back = command.startswith("B")
         left = command.endswith("L") and len(command) > 1
         right = command.endswith("R") and len(command) > 1
-        stopped = not (forward or back)
 
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(tint(INK, 0.05)))
@@ -1541,7 +2076,7 @@ class DirectionIndicator(QWidget):
             (left, 270.0),
             (right, 90.0),
         ):
-            color = tint(ACCENT_LIGHT, 0.95) if active else tint(INK, 0.18)
+            color = QColor(self._color) if active else tint(INK, 0.18)
             painter.save()
             painter.translate(center)
             painter.rotate(angle)
@@ -1557,18 +2092,209 @@ class DirectionIndicator(QWidget):
             if active:  # faint bloom behind the live direction
                 painter.setPen(Qt.PenStyle.NoPen)
                 glow = QRadialGradient(QPointF(0.0, tip_y + reach * 0.08), reach * 0.52)
-                glow.setColorAt(0.0, tint(ACCENT_LIGHT, 0.26))
-                glow.setColorAt(1.0, tint(ACCENT_LIGHT, 0.0))
+                glow_in = QColor(self._color)
+                glow_in.setAlphaF(0.26)
+                glow_out = QColor(self._color)
+                glow_out.setAlphaF(0.0)
+                glow.setColorAt(0.0, glow_in)
+                glow.setColorAt(1.0, glow_out)
                 painter.setBrush(QBrush(glow))
                 painter.drawEllipse(QPointF(0.0, tip_y + reach * 0.08), reach * 0.52, reach * 0.52)
             painter.restore()
 
-        hub = tint(WARN, 0.92) if stopped else tint(ACCENT_LIGHT, 0.92)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QBrush(tint(INK, 0.07)))
         painter.drawEllipse(center, reach * 0.30, reach * 0.30)
-        painter.setBrush(QBrush(hub))
+        painter.setBrush(QBrush(self._color))
         painter.drawEllipse(center, reach * 0.13, reach * 0.13)
+
+
+# ---------------------------------------------------------------------------
+# TelemetryGraph -- Hanoon's rolling graph, restyled
+# ---------------------------------------------------------------------------
+
+class TelemetryGraph(QWidget):
+    """Smooth rolling line graph of one value over the last 30 seconds.
+
+    Samples are bucketed (0.25 s) so the curve stays readable: 'min' keeps the
+    closest reading of each bucket, 'avg' the mean. Gaps in the data break the
+    line. The repaint timer only runs while there is data in the window.
+    """
+
+    WINDOW = 30.0
+    BUCKET = 0.25
+    GAP = 1.2
+    HEADER = 18.0
+
+    def __init__(self, title: str, unit: str, color: str, min_span: float = 100.0,
+                 cap: float | None = None, threshold: float | None = None,
+                 mode: str = "avg", parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setMinimumSize(160, 42)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._title = title.upper()
+        self._unit = unit
+        self._color = QColor(color)
+        self._min_span = float(min_span)
+        self._cap = float(cap) if cap else None  # fixed ceiling; readings above are clamped
+        self._threshold = threshold
+        self._mode = mode
+        self._samples: deque[tuple[float, float]] = deque()
+        self._bucket: list[float] = []
+        self._bucket_start: float | None = None
+        self._top = float(cap) if cap else float(min_span)
+        self._timer = QTimer(self)
+        self._timer.setInterval(100)
+        self._timer.timeout.connect(self._tick)
+
+    def add(self, value: float) -> None:
+        now = time.monotonic()
+        value = float(value)
+        if self._cap:
+            value = min(value, self._cap)
+        if self._bucket_start is None or now - self._bucket_start > self.BUCKET * 2:
+            self._bucket = []
+            self._bucket_start = now
+        self._bucket.append(value)
+        if now - self._bucket_start >= self.BUCKET:
+            result = min(self._bucket) if self._mode == "min" else sum(self._bucket) / len(self._bucket)
+            self._samples.append((now, result))
+            self._bucket = []
+            self._bucket_start = now
+            cutoff = now - self.WINDOW - 2.0
+            while self._samples and self._samples[0][0] < cutoff:
+                self._samples.popleft()
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def _tick(self) -> None:
+        now = time.monotonic()
+        while self._samples and self._samples[0][0] < now - self.WINDOW - 2.0:
+            self._samples.popleft()
+        if not self._samples:
+            self._timer.stop()  # nothing left to scroll
+        self.update()
+
+    @staticmethod
+    def _smooth_path(points: list[QPointF]) -> QPainterPath:
+        """Catmull-Rom spline through the points, as cubic Beziers."""
+        path = QPainterPath(points[0])
+        count = len(points)
+        for i in range(count - 1):
+            p0 = points[i - 1] if i > 0 else points[i]
+            p1, p2 = points[i], points[i + 1]
+            p3 = points[i + 2] if i + 2 < count else p2
+            c1 = QPointF(p1.x() + (p2.x() - p0.x()) / 6.0, p1.y() + (p2.y() - p0.y()) / 6.0)
+            c2 = QPointF(p2.x() - (p3.x() - p1.x()) / 6.0, p2.y() - (p3.y() - p1.y()) / 6.0)
+            path.cubicTo(c1, c2, p2)
+        return path
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        now = time.monotonic()
+        width, height = float(self.width()), float(self.height())
+        window_start = now - self.WINDOW
+        visible = [(t, v) for t, v in self._samples if t >= window_start - 1.0]
+
+        # The vertical range eases toward what the data needs (fixed when capped).
+        if self._cap:
+            top = self._cap
+        else:
+            peak = max((v for _, v in visible), default=0.0)
+            self._top += (max(self._min_span, peak * 1.2) - self._top) * 0.2
+            top = max(self._top, 1.0)
+
+        plot = QRectF(0, self.HEADER + 4, width, max(10.0, height - self.HEADER - 4))
+
+        def x_of(t: float) -> float:
+            return plot.left() + (t - window_start) / self.WINDOW * plot.width()
+
+        def y_of(v: float) -> float:
+            return plot.bottom() - min(max(v / top, 0.0), 1.0) * plot.height()
+
+        latest = visible[-1] if visible else None
+        live = latest is not None and now - latest[0] < 1.5
+        if not live:
+            value_text = "--"
+        elif self._cap and latest[1] >= self._cap:
+            value_text = f">{int(self._cap)} {self._unit}"
+        else:
+            value_text = f"{int(round(latest[1]))} {self._unit}"
+        painter.setFont(micro_font())
+        painter.setPen(QPen(tint(INK, 0.50)))
+        painter.drawText(QRectF(0, 0, width * 0.62, self.HEADER),
+                         int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+                         self._title)
+        painter.setFont(app_font(13, QFont.Weight.DemiBold))
+        painter.setPen(QPen(self._color if live else tint(INK, 0.40)))
+        painter.drawText(QRectF(0, 0, width, self.HEADER),
+                         int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight),
+                         value_text)
+
+        painter.setPen(QPen(tint(INK, 0.08), 1))
+        for i in range(4):
+            y = plot.top() + plot.height() * i / 3.0
+            painter.drawLine(QPointF(0, y), QPointF(width, y))
+
+        painter.save()
+        painter.setClipRect(plot.adjusted(0, -3, 0, 3))
+
+        if self._threshold is not None and self._threshold < top:
+            painter.setPen(QPen(tint(BAD, 0.55), 1, Qt.PenStyle.DashLine))
+            y = y_of(self._threshold)
+            painter.drawLine(QPointF(0, y), QPointF(width, y))
+
+        segments: list[list[QPointF]] = []
+        current: list[QPointF] = []
+        previous_t = None
+        for t, v in visible:
+            if previous_t is not None and t - previous_t > self.GAP:
+                segments.append(current)
+                current = []
+            current.append(QPointF(x_of(t), y_of(v)))
+            previous_t = t
+        if current:
+            segments.append(current)
+
+        fill = QLinearGradient(0, plot.top(), 0, plot.bottom())
+        fill_top = QColor(self._color)
+        fill_top.setAlpha(85)
+        fill_bottom = QColor(self._color)
+        fill_bottom.setAlpha(0)
+        fill.setColorAt(0.0, fill_top)
+        fill.setColorAt(1.0, fill_bottom)
+
+        line_pen = QPen(self._color, 2)
+        line_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        line_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        for points in segments:
+            if len(points) < 2:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(QBrush(self._color))
+                painter.drawEllipse(points[0], 2.0, 2.0)
+                continue
+            line = self._smooth_path(points)
+            area = QPainterPath(line)
+            area.lineTo(points[-1].x(), plot.bottom())
+            area.lineTo(points[0].x(), plot.bottom())
+            area.closeSubpath()
+            painter.fillPath(area, QBrush(fill))
+            painter.setPen(line_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawPath(line)
+
+        if live and segments:
+            end = segments[-1][-1]
+            glow = QColor(self._color)
+            glow.setAlpha(70)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(glow))
+            painter.drawEllipse(end, 6.0, 6.0)
+            painter.setBrush(QBrush(tint(INK, 0.96)))
+            painter.drawEllipse(end, 2.6, 2.6)
+        painter.restore()
 
 
 # ---------------------------------------------------------------------------
@@ -1665,18 +2391,18 @@ QLabel#metric {{
 }}
 QLabel#qrTile {{
     background-color: #FFFFFF;
-    border-radius: {RADIUS_FIELD + 6}px;
+    border-radius: {RADIUS_FIELD}px;
     color: #6B7280;
-    font-size: 12px;
+    font-size: 11px;
 }}
 QLineEdit {{
     background-color: {css(INK, 0.08)};
     color: {css(INK, 0.96)};
     border: 1px solid {css(INK, 0.14)};
     border-radius: {RADIUS_FIELD}px;
-    padding: 12px 16px;
+    padding: 10px 14px;
     font-family: "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", sans-serif;
-    font-size: 15px;
+    font-size: 14px;
     selection-background-color: {css(ACCENT, 0.55)};
 }}
 QLineEdit:hover {{
@@ -1745,7 +2471,7 @@ QScrollBar::add-page, QScrollBar::sub-page {{
     background: transparent;
 }}
 QToolTip {{
-    background-color: #161B28;
+    background-color: #1C1D21;
     color: {css(INK, 0.94)};
     border: 1px solid {css(INK, 0.16)};
     border-radius: 10px;
@@ -1754,7 +2480,7 @@ QToolTip {{
     font-size: 12px;
 }}
 QMessageBox {{
-    background-color: #0B0F1A;
+    background-color: #17181B;
 }}
 QMessageBox QLabel {{
     color: {css(INK, 0.90)};
@@ -1769,6 +2495,6 @@ QMessageBox QPushButton {{
     font-weight: 600;
 }}
 QFileDialog {{
-    background-color: #0B0F1A;
+    background-color: #17181B;
 }}
 """
