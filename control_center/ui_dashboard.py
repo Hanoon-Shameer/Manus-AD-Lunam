@@ -126,7 +126,7 @@ class SerialConnectWorker(QThread):
 
 
 class MissionConnectPage(QWidget):
-    """Page 1: stream sources and mobile-app pairing, in one compact card.
+    """Page 1: stream sources, in one compact card.
 
     Holds the authoritative source-validation logic. Field errors appear as
     inline captions rather than modal dialogs; the accepted values are exactly
@@ -135,12 +135,10 @@ class MissionConnectPage(QWidget):
 
     connect_requested = pyqtSignal()
     CARD_WIDTH = 480
-    QR_TILE = 104
 
     def __init__(self, parent=None, icon_path=None):
         super().__init__(parent)
         self.setObjectName('page')
-        self.qr_settings = QSettings("Manus", "ManusADLunam")
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(40, 28, 40, 28)
@@ -156,10 +154,6 @@ class MissionConnectPage(QWidget):
 
         outer.addLayout(column)
         outer.addStretch(1)
-
-        saved_qr_path = self.qr_settings.value("mobile_app_qr_path", "") or ""
-        if saved_qr_path and os.path.isfile(saved_qr_path):
-            self.set_qr_image(saved_qr_path, persist=False)
 
     # -- construction -------------------------------------------------------
     def _build_header(self, icon_path):
@@ -224,10 +218,6 @@ class MissionConnectPage(QWidget):
         self.rover_error = self._error_label()
         card.body.addWidget(self.rover_error)
 
-        card.body.addSpacing(8)
-        card.body.addWidget(self._hairline())
-        card.body.addSpacing(8)
-        card.body.addLayout(self._build_pairing_row())
         card.body.addSpacing(10)
 
         self.submit_btn = PillButton('Connect Streams', variant='primary',
@@ -251,71 +241,6 @@ class MissionConnectPage(QWidget):
         line.setFixedHeight(1)
         line.setStyleSheet(f'background-color: {css(INK, 0.10)};')
         return line
-
-    def _build_pairing_row(self):
-        """QR thumbnail beside its caption, file name and picker."""
-        row = QHBoxLayout()
-        row.setSpacing(16)
-
-        self.qr_preview = QLabel('No QR\nimage')
-        self.qr_preview.setObjectName('qrTile')
-        self.qr_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.qr_preview.setFixedSize(self.QR_TILE, self.QR_TILE)
-        row.addWidget(self.qr_preview, 0, Qt.AlignmentFlag.AlignTop)
-
-        details = QVBoxLayout()
-        details.setSpacing(6)
-        details.addWidget(caption_label('Mobile App Pairing'))
-        # One elided line (it is a file name).
-        self.qr_path_label = QLabel('No image selected')
-        self.qr_path_label.setObjectName('helper')
-        details.addWidget(self.qr_path_label)
-        self.load_qr_btn = PillButton('Choose Image…', glyph='image', compact=True)
-        details.addWidget(self.load_qr_btn, 0, Qt.AlignmentFlag.AlignLeft)
-        self.load_qr_btn.clicked.connect(self.choose_qr_image)
-        note = QLabel('Displays the image only; it does not\ngenerate or verify the QR contents.')
-        note.setObjectName('helper')
-        details.addWidget(note)
-        details.addStretch(1)
-        row.addLayout(details, 1)
-        return row
-
-    # -- QR picker ----------------------------------------------------------
-    def choose_qr_image(self):
-        """Select and preview a user-created static QR image."""
-        initial_path = self.qr_settings.value("mobile_app_qr_path", "") or ""
-        image_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select the mobile app QR image",
-            initial_path if os.path.isfile(initial_path) else "",
-            "Image files (*.png *.jpg *.jpeg *.bmp)",
-        )
-        if image_path:
-            self.set_qr_image(image_path)
-
-    def set_qr_image(self, image_path, persist=True):
-        pixmap = QPixmap(image_path)
-        if pixmap.isNull():
-            QMessageBox.warning(self, "Invalid image", "The selected file could not be loaded as an image.")
-            return
-
-        # Inset the code so the white tile keeps its rounded corners visible.
-        inset = self.qr_preview.size() - QSize(14, 14)
-        self.qr_preview.setPixmap(
-            pixmap.scaled(
-                inset,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation,
-            )
-        )
-        self.qr_path_label.setText(
-            self.qr_path_label.fontMetrics().elidedText(
-                os.path.basename(image_path), Qt.TextElideMode.ElideMiddle, 250
-            )
-        )
-        self.qr_path_label.setToolTip(image_path)
-        if persist:
-            self.qr_settings.setValue("mobile_app_qr_path", image_path)
 
     # -- validation ---------------------------------------------------------
     @staticmethod
@@ -411,17 +336,8 @@ class SourceControlDialog(QDialog):
         # Mirror the page's fields so existing attribute access keeps working.
         self.gesture_input = self.page.gesture_input
         self.rover_input = self.page.rover_input
-        self.qr_preview = self.page.qr_preview
-        self.qr_path_label = self.page.qr_path_label
-        self.qr_settings = self.page.qr_settings
 
     _is_stream_url = staticmethod(MissionConnectPage._is_stream_url)
-
-    def choose_qr_image(self):
-        self.page.choose_qr_image()
-
-    def set_qr_image(self, image_path, persist=True):
-        self.page.set_qr_image(image_path, persist)
 
     def validate_and_accept(self):
         self.page.validate_and_accept()
@@ -525,10 +441,11 @@ class UltrasonicRadarWidget(QWidget):
         bounds = QRectF(self.rect()).adjusted(4, 2, -4, -2)
         compact = bounds.height() < self.COMPACT_BELOW
         footer = self.FOOTER_COMPACT if compact else self.FOOTER_HEIGHT
-        radius = max(24.0, min(bounds.width() / 2.0 - 8.0, bounds.height() - footer - 18.0))
+        # Increase the multipliers to fill empty space while keeping the layout intact
+        radius = max(24.0, min(bounds.width() / 2.0 - 4.0, bounds.height() - footer - 12.0))
         # Centre the scope + readout block vertically, so a tall card does not
         # leave all its spare room above the arc.
-        block = radius + 18.0 + footer
+        block = radius + 12.0 + footer
         top = bounds.top() + max(0.0, (bounds.height() - block) / 2.0)
         panel = QRectF(bounds.left(), top, bounds.width(), block)
         center = QPointF(panel.center().x(), panel.bottom() - footer)
