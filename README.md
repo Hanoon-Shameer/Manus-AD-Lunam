@@ -181,14 +181,15 @@ Contributions are what make the open source community such an amazing place to l
 
 ---
 
-## 👥 Team
+## 👥 Crew
 
 <div align="center">
 
-Created by:
-- [@Hanoon-Shameer](https://github.com/Hanoon-Shameer)
-- [@sn0pox](https://github.com/sn0pox)
-- [@syed-sadiq-2009](https://github.com/syed-sadiq-2009)
+| Role | Member | GitHub |
+|------|--------|--------|
+| 🔧 **Hardware Specialist** | Hanoon Shameer | [@Hanoon-Shameer](https://github.com/Hanoon-Shameer) |
+| 💻 **Programmer** | Abhay Vinod | [@sn0pox](https://github.com/sn0pox) |
+| 🎨 **Designer** | Syed Sadiq | [@syed-sadiq-2009](https://github.com/syed-sadiq-2009) |
 
 </div>
 
@@ -200,15 +201,17 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-## 🌐 Links
-
-- **Live Demo**: [manus-ad-lunam.surge.sh](https://manus-ad-lunam.surge.sh)
-- **Repository**: [GitHub](https://github.com/Hanoon-Shameer/Manus-AD-Lunam)
-- **Issues**: [Report Issues](https://github.com/Hanoon-Shameer/Manus-AD-Lunam/issues)
-
 ---
 
 <div align="center">
+
+## 🌐 Experience It Live
+
+### **[🚀 Launch Demo →](https://manus-ad-lunam.surge.sh)**
+
+<sub>See the project in action at **manus-ad-lunam.surge.sh**</sub>
+
+---
 
 ### ⭐ Star this repository if you found it helpful!
 
