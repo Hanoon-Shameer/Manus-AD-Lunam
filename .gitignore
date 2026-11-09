@@ -4,7 +4,6 @@
 .manus/
 .work/
 outputs/
-assets/
 mcp-js-*
 
 # Exclude Windows system files
