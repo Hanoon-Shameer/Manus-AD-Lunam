@@ -21,8 +21,10 @@ import os
 import time
 from urllib.parse import urlsplit
 
+import qrcode
 from PyQt6.QtCore import (
     QEasingCurve,
+    QPoint,
     QPointF,
     QPropertyAnimation,
     QRectF,
@@ -31,13 +33,17 @@ from PyQt6.QtCore import (
     Qt,
     QThread,
     QTimer,
+    pyqtProperty,
     pyqtSignal,
 )
 from PyQt6.QtGui import (
     QBrush,
+    QColor,
     QConicalGradient,
     QFont,
     QIcon,
+    QImage,
+    QLinearGradient,
     QPainter,
     QPainterPath,
     QPen,
@@ -98,6 +104,10 @@ from ui_theme import (
     numeral_font,
     tint,
     title_label,
+    _scene_behind,
+    GLASS_TINT_TOP,
+    GLASS_TINT_BOTTOM,
+    GLASS_SHEEN,
 )
 
 RADAR_RANGE_CM = 35.0        # outer ring of the ultrasonic sweep
@@ -344,6 +354,214 @@ class SourceControlDialog(QDialog):
 
     def get_sources(self):
         return self.page.get_sources()
+
+
+class QRCodeDialog(QDialog):
+    """Fullscreen QR code modal with liquid glass blur background.
+
+    Shows a QR code pointing to manus-ad-lunam.surge.sh. Clicking anywhere
+    or pressing Escape closes the dialog.
+    """
+
+    URL = "https://manus-ad-lunam.surge.sh"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+
+        # Make it fullscreen
+        screen = parent.screen() if parent else None
+        if screen:
+            self.setGeometry(screen.geometry())
+        else:
+            self.showFullScreen()
+
+        self._opacity = 0.0
+        self._bg_opacity = 0.0  # 0 = liquid glass, 1 = solid white
+        self._anim = QPropertyAnimation(self, b"opacity", self)
+        self._anim.setDuration(300)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.finished.connect(self._on_anim_finished)
+
+        # Background fade animation - fades from liquid glass to solid white
+        self._bg_anim = QPropertyAnimation(self, b"bg_opacity", self)
+        self._bg_anim.setDuration(800)  # Slower fade for background
+        self._bg_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._setup_ui()
+        self._generate_qr_code()
+
+    def _get_opacity(self) -> float:
+        return self._opacity
+
+    def _set_opacity(self, value: float) -> None:
+        self._opacity = float(value)
+        self.setWindowOpacity(value)
+        self.update()
+
+    opacity = pyqtProperty(float, _get_opacity, _set_opacity)
+
+    def _get_bg_opacity(self) -> float:
+        return self._bg_opacity
+
+    def _set_bg_opacity(self, value: float) -> None:
+        self._bg_opacity = float(value)
+        self.update()
+
+    bg_opacity = pyqtProperty(float, _get_bg_opacity, _set_bg_opacity)
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        # Main container that fills the screen
+        self.container = QWidget()
+        self.container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        layout.addWidget(self.container)
+
+        container_layout = QVBoxLayout(self.container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        # QR Code display area
+        self.qr_label = QLabel()
+        self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.qr_label.setStyleSheet("background: transparent;")
+        container_layout.addWidget(self.qr_label, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # Caption
+        self.caption = QLabel("Scan to visit manus-ad-lunam.surge.sh")
+        self.caption.setFont(app_font(16, QFont.Weight.Medium))
+        self.caption.setStyleSheet(f"color: {css(INK, 0.85)}; background: transparent;")
+        self.caption.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        container_layout.addWidget(self.caption)
+
+        container_layout.addSpacing(20)
+
+        # Hint
+        self.hint = QLabel("Click anywhere or press ESC to close")
+        self.hint.setFont(app_font(12, QFont.Weight.Normal))
+        self.hint.setStyleSheet(f"color: {css(INK, 0.55)}; background: transparent;")
+        self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        container_layout.addWidget(self.hint)
+
+    def _generate_qr_code(self):
+        """Generate QR code pixmap."""
+        qr = qrcode.QRCode(
+            version=4,
+            error_correction=qrcode.constants.ERROR_CORRECT_H,
+            box_size=12,
+            border=2,
+        )
+        qr.add_data(self.URL)
+        qr.make(fit=True)
+
+        # Create QR code image with plain white background - black QR on white for best camera readability
+        qr_img = qr.make_image(fill_color="black", back_color="white")
+
+        # Convert to QPixmap
+        qr_img = qr_img.convert("RGBA")
+        data = qr_img.tobytes("raw", "RGBA")
+        qimage = QImage(data, qr_img.width, qr_img.height, QImage.Format.Format_RGBA8888)
+        pixmap = QPixmap.fromImage(qimage)
+
+        # Scale to nice size (max 400px)
+        max_size = 400
+        scaled = pixmap.scaled(
+            max_size, max_size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.qr_label.setPixmap(scaled)
+        self.qr_label.setFixedSize(scaled.size())
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.start()
+
+        # Start background fade to white
+        self._bg_anim.setStartValue(0.0)
+        self._bg_anim.setEndValue(1.0)
+        self._bg_anim.start()
+
+    def _on_anim_finished(self):
+        if self._opacity <= 0.0:
+            self.close()
+
+    def closeEvent(self, event):
+        self._anim.finished.disconnect(self._on_anim_finished)
+        self._anim.finished.connect(lambda: super(QRCodeDialog, self).closeEvent(event))
+        self._anim.setStartValue(self._opacity)
+        self._anim.setEndValue(0.0)
+        self._anim.start()
+        event.ignore()
+
+    def mousePressEvent(self, event):
+        """Close on click anywhere."""
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.close()
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event):
+        """Close on Escape."""
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+        super().keyPressEvent(event)
+
+    def paintEvent(self, event):
+        """Paint background that fades from liquid glass to solid white."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        rect = self.rect()
+
+        if self._bg_opacity >= 1.0:
+            # Fully white background for QR code readability
+            painter.fillRect(rect, Qt.GlobalColor.white)
+        else:
+            # Get the scene behind (StarfieldBackground) and paint frosted version
+            scene = _scene_behind(self)
+            if scene:
+                # Paint frosted backdrop
+                scene.paint_frost(
+                    painter,
+                    QRect(self.mapTo(scene, QPoint(0, 0)), self.size()),
+                    QRectF(self.rect())
+                )
+
+            # Liquid glass overlay layers (blended with white based on bg_opacity)
+            # Dark tint
+            dark_overlay = QRadialGradient(QPointF(rect.center()), max(rect.width(), rect.height()) * 0.7)
+            dark_overlay.setColorAt(0.0, tint("#000000", 0.35 * (1.0 - self._bg_opacity)))
+            dark_overlay.setColorAt(0.5, tint("#000000", 0.55 * (1.0 - self._bg_opacity)))
+            dark_overlay.setColorAt(1.0, tint("#000000", 0.75 * (1.0 - self._bg_opacity)))
+            painter.fillRect(rect, QBrush(dark_overlay))
+
+            # White wash (glass tint) - increases with bg_opacity
+            wash_alpha = GLASS_TINT_TOP * 0.8 * (1.0 - self._bg_opacity) + 1.0 * self._bg_opacity
+            wash = QLinearGradient(QPointF(rect.topLeft()), QPointF(rect.bottomLeft()))
+            wash.setColorAt(0.0, tint(INK, wash_alpha))
+            wash.setColorAt(1.0, tint(INK, GLASS_TINT_BOTTOM * 0.8 * (1.0 - self._bg_opacity) + 1.0 * self._bg_opacity))
+            painter.fillRect(rect, QBrush(wash))
+
+            # Specular sheen at top - fades out as white fades in
+            sheen_height = min(rect.height() * 0.35, 120.0)
+            sheen = QLinearGradient(QPointF(0, rect.top()), QPointF(0, rect.top() + sheen_height))
+            sheen.setColorAt(0.0, tint(INK, GLASS_SHEEN * 0.6 * (1.0 - self._bg_opacity)))
+            sheen.setColorAt(1.0, tint(INK, 0.0))
+            painter.fillRect(QRectF(rect.left(), rect.top(), rect.width(), sheen_height), QBrush(sheen))
+
+            # Add solid white overlay based on bg_opacity
+            if self._bg_opacity > 0.0:
+                white_overlay = QColor(255, 255, 255, int(255 * self._bg_opacity))
+                painter.fillRect(rect, white_overlay)
+
+        super().paintEvent(event)
 
 
 class UltrasonicRadarWidget(QWidget):
@@ -855,6 +1073,12 @@ class MADDashboard(QMainWindow):
         self.sources_btn.setToolTip('Stop the feeds and change the stream sources')
         self.sources_btn.clicked.connect(self.prompt_source_control)
         action_row.addWidget(self.sources_btn)
+
+        self.qr_btn = PillButton('QR Code', variant='ghost', glyph='image',
+                                  compact=True, height=38)
+        self.qr_btn.setToolTip('Show QR code for manus-ad-lunam.surge.sh')
+        self.qr_btn.clicked.connect(self.show_qr_code)
+        action_row.addWidget(self.qr_btn)
         row.addWidget(actions)
         return header
 
@@ -1188,6 +1412,11 @@ class MADDashboard(QMainWindow):
         self.log_box.append('[SYS] Returned to source configuration; feeds stopped.')
         self._goto_page(self.connect_page)
         self.connect_page.gesture_input.setFocus()
+
+    def show_qr_code(self):
+        """Show the QR code dialog with liquid glass blur background."""
+        dialog = QRCodeDialog(self)
+        dialog.exec()
 
     # ------------------------------------------------------- camera threads --
     def _start_streams(self):
