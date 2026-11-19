@@ -20,10 +20,10 @@
 
 Servo radarServo;
 
-long duration;
-int distance;
+unsigned long duration = 0;
+int distance = 0;
 int servoAngle = 90;
-int sweepDirection = 5; 
+int sweepDirection = 5;
 unsigned long lastRadarScan = 0;
 
 uint8_t transmitterAddress[6] = {0};
@@ -62,16 +62,16 @@ void setMotorSpeedAndDirection(int in1, int in2, int in3, int in4, uint8_t speed
   analogWrite(ENB_PIN, effectiveSpeed);
 }
 
-// 4WD tank steering directional mappings
-void moveForward(uint8_t spd)      { setMotorSpeedAndDirection(0, 1, 0, 1, spd); } 
-void moveBackward(uint8_t spd)     { setMotorSpeedAndDirection(1, 0, 1, 0, spd); } 
-void turnLeft(uint8_t spd)         { setMotorSpeedAndDirection(0, 1, 1, 0, spd); } 
-void turnRight(uint8_t spd)        { setMotorSpeedAndDirection(1, 0, 0, 1, spd); } 
-void moveForwardLeft(uint8_t spd)  { setMotorSpeedAndDirection(0, 1, 1, 0, spd); } 
-void moveForwardRight(uint8_t spd) { setMotorSpeedAndDirection(1, 0, 0, 1, spd); } 
-void moveBackLeft(uint8_t spd)     { setMotorSpeedAndDirection(1, 0, 0, 1, spd); } 
-void moveBackRight(uint8_t spd)    { setMotorSpeedAndDirection(0, 1, 1, 0, spd); } 
-void stopMotors()                  { setMotorSpeedAndDirection(0, 0, 0, 0, 0); } 
+// Tank steering directional mappings
+void moveForward(uint8_t spd)      { setMotorSpeedAndDirection(0, 1, 0, 1, spd); }
+void moveBackward(uint8_t spd)     { setMotorSpeedAndDirection(1, 0, 1, 0, spd); }
+void turnLeft(uint8_t spd)         { setMotorSpeedAndDirection(0, 1, 1, 0, spd); }
+void turnRight(uint8_t spd)        { setMotorSpeedAndDirection(1, 0, 0, 1, spd); }
+void moveForwardLeft(uint8_t spd)  { setMotorSpeedAndDirection(0, 1, 1, 0, spd); }
+void moveForwardRight(uint8_t spd) { setMotorSpeedAndDirection(1, 0, 0, 1, spd); }
+void moveBackLeft(uint8_t spd)     { setMotorSpeedAndDirection(1, 0, 0, 1, spd); }
+void moveBackRight(uint8_t spd)    { setMotorSpeedAndDirection(0, 1, 1, 0, spd); }
+void stopMotors()                  { setMotorSpeedAndDirection(0, 0, 0, 0, 0); }
 
 // --- ULTRASONIC SENSING ---
 int getDistance() {
@@ -81,10 +81,13 @@ int getDistance() {
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
 
-  duration = pulseIn(ECHO_PIN, HIGH, 25000); 
-  if (duration == 0) return 400;             
+  // 25,000 us timeout (~4.2m max) prevents blocking loop if no echo returns
+  duration = pulseIn(ECHO_PIN, HIGH, 25000);
+  if (duration == 0) {
+    return 400; // Treat 0 duration (timeout/no echo) as out-of-range fallback
+  }
 
-  return duration * 0.0343 / 2;             
+  return (int)(duration * 0.0343 / 2); // Speed of sound ~0.0343 cm/us, divided by 2 for round trip
 }
 
 void registerTransmitterForTelemetry() {
@@ -113,17 +116,25 @@ void sendRadarTelemetry(int angle, int distanceCm) {
 
 // --- RADAR SWEEP ---
 void updateRadar() {
-  if (millis() - lastRadarScan >= 50) { 
+  if (millis() - lastRadarScan >= 65) {
     lastRadarScan = millis();
 
     radarServo.write(servoAngle);
+    delay(10); // Brief settle pause so echo reading isn't taken mid-jerk
     distance = getDistance();
+
+    Serial.print("Angle: ");
+    Serial.print(servoAngle);
+    Serial.print(" | Duration (us): ");
+    Serial.print(duration);
+    Serial.print(" | Distance (cm): ");
+    Serial.println(distance);
 
     sendRadarTelemetry(servoAngle, distance);
 
     servoAngle += sweepDirection;
     if (servoAngle <= 30 || servoAngle >= 150) {
-      sweepDirection = -sweepDirection; 
+      sweepDirection = -sweepDirection;
     }
   }
 }
@@ -155,7 +166,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingDataBytes, int len) {
   else if (cmd == "BR")  moveBackRight(spd);
   else if (cmd == "L")   turnLeft(spd);
   else if (cmd == "R")   turnRight(spd);
-  else                   stopMotors(); 
+  else                   stopMotors();
 }
 
 void setup() {
