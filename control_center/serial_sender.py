@@ -1,3 +1,4 @@
+import re
 import serial
 import serial.tools.list_ports
 import time
@@ -68,10 +69,11 @@ class SerialSender:
             return False
 
     def send_command(self, command_str, speed=0):
-        """Send COMMAND:SPEED for the transmitter's ESP-NOW GestureMessage."""
+        """Send COMMAND,SPEED for the transmitter's ESP-NOW GestureMessage."""
         if self.ser and self.ser.is_open:
             speed_value = max(0, min(255, int(speed)))
-            packet = f"{command_str}:{speed_value}\n".encode("utf-8")
+            # Transmitter firmware splits on ',' (handleSerialLine); any other separator corrupts the command.
+            packet = f"{command_str},{speed_value}\n".encode("utf-8")
             try:
                 self.ser.write(packet)
                 return True
@@ -98,17 +100,14 @@ class SerialSender:
                 raw_line, _, remainder = self._receive_buffer.partition(b"\n")
                 self._receive_buffer = bytearray(remainder)
                 line = raw_line.decode("utf-8", errors="ignore").strip()
-                if not line.startswith("RADAR:"):
+                if not line.startswith("RADAR"):
                     continue
 
-                parts = line.split(":")
-                if len(parts) != 3:
+                # Accepts both "RADAR:90:30" and older firmware's "RADAR -> Angle: 90 deg | Dist: 30 cm".
+                numbers = re.findall(r"-?\d+", line)
+                if len(numbers) != 2:
                     continue
-                try:
-                    angle = int(parts[1])
-                    distance_cm = int(parts[2])
-                except ValueError:
-                    continue
+                angle, distance_cm = int(numbers[0]), int(numbers[1])
                 if 0 <= angle <= 180 and 0 <= distance_cm <= 400:
                     readings.append((angle, distance_cm))
         except serial.SerialException as e:
